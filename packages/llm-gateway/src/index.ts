@@ -43,7 +43,11 @@ export {
 } from './pipeline/public-identity';
 export type { PublicUpstreamError } from './pipeline/public-identity';
 
-export { callUpstream } from './http';
+export {
+  assertFreeOpenRouterModelId,
+  callUpstream,
+  isAllowedFreeOpenRouterModelId,
+} from './http';
 export type { CallUpstreamOptions, FetchImpl } from './http';
 
 export { withRetry } from './resilience';

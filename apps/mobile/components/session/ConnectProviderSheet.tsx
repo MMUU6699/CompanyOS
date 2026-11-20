@@ -54,52 +54,13 @@ export interface ConnectProviderSheetProps {
 }
 
 export const ConnectProviderSheet = React.forwardRef<SheetRef, ConnectProviderSheetProps>(
-  ({ projectId, onRefetchModels }, ref) => {
-    const toast = useToast();
-    const sheetRef = React.useRef<SheetRef>(null);
-
-    const { requestContinue, handleDismiss } = useHandoffDismiss(async () => {
-      try {
-        // The page redirects to PROVIDER_CONNECTED_URI once the project has a
-        // usable model; the auth session closes itself on that redirect. It
-        // also resolves when the user closes the browser by hand (Android:
-        // on return to the app), so the refetch below always runs after the
-        // trip, never at launch.
-        await WebBrowser.openAuthSessionAsync(
-          projectModelsWebUrl(KORTIX_WEB_URL, projectId, PROVIDER_CONNECTED_URI),
-          PROVIDER_RETURN_URL,
-        );
-      } catch {
-        // The browser trip failed to open; still check in case something
-        // changed (e.g. the provider was added another way).
-      }
-      const count = await onRefetchModels();
-      if (count > 0) toast.success('Provider connected');
-    });
-
+  (_props, ref) => {
     React.useImperativeHandle(ref, () => ({
-      open: () => sheetRef.current?.open(),
-      close: () => sheetRef.current?.close(),
+      open: () => {},
+      close: () => {},
     }));
-
-    const handleContinue = React.useCallback(() => {
-      requestContinue(sheetRef);
-    }, [requestContinue]);
-
-    return (
-      <Sheet ref={sheetRef} enablePanDownToClose onDismiss={handleDismiss}>
-        {/* No provider is chosen yet, so the app tile is the plug. */}
-        <HandoffSheetBody
-          name=""
-          iconUrl={null}
-          title="Connect a model provider"
-          body="Add a provider on kortix.com. You come back here when you're done."
-          action="Continue to kortix.com"
-          onContinue={handleContinue}
-          onClose={() => sheetRef.current?.close()}
-        />
-      </Sheet>
-    );
+    // Provider connection & BYOK UI is disabled; backend locks inference to NVIDIA Gemma 4 31B.
+    return null;
   },
 );
 ConnectProviderSheet.displayName = 'ConnectProviderSheet';

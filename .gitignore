@@ -92,7 +92,10 @@ strix_runs/
 example-project/
 
 # Next.js
-.vercel/
+.vercel
+.netlify
+.netlify/
+.railwayignore/
 
 # Supabase
 supabase/.temp/
@@ -124,6 +127,9 @@ apps/api/.sandbox-auth-token.json
 .pulumi
 .pulumi/
 .vercel
+.netlify
+.netlify/
+.railwayignore
 
 
 /kortix

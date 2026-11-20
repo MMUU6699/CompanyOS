@@ -515,8 +515,8 @@
   "billing": {
     "loadingPaywall": "プランを読み込み中...",
     "checkoutUnavailable": "モバイル決済は利用できません",
-    "checkoutUnavailableMessage": "プランに登録するには、ウェブでkortix.comにアクセスしてください。",
-    "goToWeb": "kortix.comに移動",
+    "checkoutUnavailableMessage": "プランに登録するには、Kortix ウェブアプリにアクセスしてください。",
+    "goToWeb": "Kortix ウェブアプリを開く",
     "billingStatus": "請求ステータス",
     "loading": "請求情報を読み込み中...",
     "error": "請求情報の読み込みに失敗しました",
@@ -544,8 +544,8 @@
     "choosePackageBoost": "パッケージを選んでクレジット残高を增やそう",
     "title": "請求",
     "cancelsOn": "終了日",
-    "manageOnWeb": "kortix.comで管理",
-    "openWebFailed": "kortix.comを開けませんでした。もう一度お試しください。"
+    "manageOnWeb": "ウェブアプリで管理",
+    "openWebFailed": "ウェブアプリを開けませんでした。もう一度お試しください。"
   },
   "theme": {
     "title": "外観",
@@ -567,12 +567,12 @@
   "beta": {
     "title": "ベータ機能",
     "webSupportTitle": "Web版で完全サポート",
-    "webSupportDescription": "Kortix.comで利用可能。モバイル版は近日公開予定—こちらではまだ開発中です。",
-    "visitKortix": "Kortix.comを訪問",
+    "webSupportDescription": "Kortix ウェブアプリで利用可能。モバイル版は近日公開予定—こちらではまだ開発中です。",
+    "visitKortix": "Kortix ウェブアプリを開く",
     "advancedFeatures": "高度な機能",
     "mobileBeta": "モバイルベータ",
     "pleaseNote": "注意事項",
-    "mobileWarning": "モバイル版は開発中で問題が発生する可能性があります。最良の体験のため、Kortix.comをご利用ください。"
+    "mobileWarning": "モバイル版は開発中で問題が発生する可能性があります。最良の体験のため、Kortix ウェブアプリをご利用ください。"
   },
   "accountDeletion": {
     "title": "アカウント削除",
@@ -1299,7 +1299,7 @@
     "createTitle": "ワークスペースを作成",
     "createBody": "ワークスペースは、会社が Kortix で働く場所です。メンバー、エージェント、そして彼らが作るすべてがここにあります。",
     "createOnWebTitle": "ウェブでワークスペースを作成",
-    "createOnWebLine": "ワークスペースは kortix.com で作成します。",
+    "createOnWebLine": "ワークスペースは Kortix ウェブアプリで作成します。",
     "invitedHint": "招待されましたか？メールの招待リンクを開くか、管理者に {{email}} を招待するよう依頼してください。",
     "yours": "あなたのワークスペース",
     "openNamed": "{{workspace}} を開く",
@@ -1331,7 +1331,7 @@
     "name": "ワークスペース名",
     "billing": "請求",
     "billingAndMembers": "請求とメンバー",
-    "onWeb": "kortix.com で",
+    "onWeb": "ウェブアプリで",
     "members": "メンバー",
     "git": "Git",
     "auditLog": "監査ログ",

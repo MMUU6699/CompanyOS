@@ -16,7 +16,7 @@ export function parseDomains(text: string): string[] {
 
 /** The Kortix URL a computer enrolls with: the API origin without `/v1` (the engine adds it). */
 export function enrollmentUrl(backendUrl: string | undefined): string {
-  return (backendUrl || 'https://api.kortix.com/v1').replace(/\/+$/, '').replace(/\/v1$/, '');
+  return (backendUrl || 'https://kortix-api-production-20b48504.up.railway.app/v1').replace(/\/+$/, '').replace(/\/v1$/, '');
 }
 
 /** Where a computer downloads an installer: the dev build for the dev API, else the latest release. */

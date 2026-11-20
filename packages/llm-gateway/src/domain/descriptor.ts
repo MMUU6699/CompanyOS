@@ -55,6 +55,12 @@ export interface UpstreamDescriptor {
   appName?: string;
   appReferer?: string;
   resolvedModel?: string;
+  /**
+   * Optional OpenRouter native fallback chain (`models` + `route: "fallback"`).
+   * Capped at 3 items per OpenRouter API rules and strictly validated by the
+   * zero-cost `:free` guard before any request leaves the gateway.
+   */
+  fallbackModels?: readonly string[];
   headers?: Record<string, string>;
   omitAuthorization?: boolean;
   /**

@@ -55,3 +55,20 @@ test('a missing code still offers a fresh link', async () => {
   try { expect(JSON.stringify(tree.toJSON())).toContain('Link expired'); }
   finally { await act(async () => tree?.unmount()); }
 });
+
+test('token_hash recovery link renders the form and strips token_hash on success', async () => {
+  globalThis.FormData = PasswordFormData;
+  url = new URL('http://localhost/auth/reset-password?token_hash=synthetic-hash&type=recovery');
+  result = { success: true };
+  let tree: ReturnType<typeof create> | undefined;
+  await act(async () => { tree = create(<ResetPassword />); });
+  if (!tree) throw new Error('Page did not render');
+  const root = tree;
+  try {
+    expect(JSON.stringify(root.toJSON())).not.toContain('Link expired');
+    await act(async () => root.root.findByType('form').props.onSubmit({ preventDefault() {}, currentTarget: {} }));
+    expect(url.searchParams.get('token_hash')).toBeNull();
+    expect(url.searchParams.get('type')).toBeNull();
+    expect(JSON.stringify(root.toJSON())).toContain('Password updated');
+  } finally { await act(async () => root.unmount()); }
+});

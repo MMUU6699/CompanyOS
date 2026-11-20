@@ -1,5 +1,6 @@
 import { copyFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // The emoji picker (packages/ui/src/primitives/emoji-picker.tsx) is built on frimousse, which
 // fetches the emojibase dataset in the browser the first time the picker opens.
@@ -41,7 +42,7 @@ export const EMOJIBASE_DATA_ASSETS = [
 ];
 
 function resolve(relativePath) {
-  return new URL(relativePath, import.meta.url).pathname;
+  return fileURLToPath(new URL(relativePath, import.meta.url));
 }
 
 /** Absolute paths of the installed dataset files the copy reads. */

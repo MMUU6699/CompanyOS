@@ -191,7 +191,6 @@ export const PROJECT_ADMIN_RESOURCES: readonly ProjectAdminResource[] = [
   { key: 'eval-datasets', icon: DatabaseIcon, capability: null, host: false, flag: 'evals', memberOpen: true },
   { key: 'eval-tasks', icon: ListChecksIcon, capability: null, host: false, flag: 'evals', memberOpen: true },
   { key: 'eval-jobs', icon: PlayCircleIcon, capability: null, host: false, flag: 'evals', memberOpen: true },
-  { key: 'models', icon: CpuIcon, capability: 'models', host: false },
   { key: 'repo', icon: FoldersIcon, capability: 'files', host: false, flag: 'drives' },
 ];
 
@@ -241,7 +240,7 @@ export function projectAdminNavTarget(tab: string): ProjectAdminSectionKey | nul
   // An account section id (`members`, …) means something else in the overlay
   // vocabulary (`members` is the project roster): it keeps resolving there.
   if (direct && !isWorkspaceAccountSection(direct)) return direct;
-  if (tab.startsWith('llm-')) return 'models';
+  if (tab.startsWith('llm-')) return 'general';
   if (tab === 'channels') return 'connectors';
   if (tab === 'reminders') return 'triggers';
   if (tab === 'workspace') return 'general';

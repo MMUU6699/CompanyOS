@@ -124,22 +124,12 @@ const components: UiHostComponents = {
   HomeAnnouncement: lazyClient(() =>
     import('@kortix/ui/workspace/home/mobile-app-promo').then((m) => outsideExtensionPanel(m.MobileAppPromo)),
   ),
-  // Only the `codex` pooled provider exists today; the dialog ignores `providerId`.
-  ProviderAccountsModal: lazyClient(() =>
-    import('@/features/providers/chatgpt-accounts-dialog').then((m) => m.ChatGptAccountsDialog),
-  ),
   ConnectorConnectModal: lazyClient(() =>
     import('@/components/setup-links/connector-connect-modal').then((m) => m.ConnectorConnectModal),
   ),
   ShareSessionModal: lazyClient(() =>
     import('@kortix/ui/workspace/sidebar/modal/share-session-modal').then(
       (m) => m.ShareSessionModal,
-    ),
-  ),
-  // The whole Customize → Models surface: loaded on first open only.
-  ProjectProviderModal: lazyClient(() =>
-    import('@kortix/ui/customize/sections/llm-provider/llm-provider-modal').then(
-      (m) => m.ProjectProviderModal,
     ),
   ),
 };
@@ -179,7 +169,8 @@ export function KortixUiProvider({ children }: { children: ReactNode }) {
   const config = useMemo<Partial<UiHostConfig>>(
     () => ({
       connectorsEnabled: isConnectorsEnabled(),
-      managedModelsEnabled: isManagedProviderEnabled(),
+      managedModelsEnabled: false,
+      modelPickerEnabled: false,
       deploymentVersion: getEnv().VERSION,
       // apps/web mounts the command palette (⌘K) and the settings shortcut (⌘,).
       commandPaletteShortcut: true,

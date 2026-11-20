@@ -489,7 +489,7 @@ export function CardSection() {
         <CardGroup columns={2} separated border="outlined">
           <Card
             label={tI18nComplete.raw('text559b1cc46027')}
-            href="https://docs.kortix.com"
+            href="https://kortix-computer-app.netlify.app/docs"
             external
           >
             <CardHeader>
@@ -498,7 +498,7 @@ export function CardSection() {
               <CardDescription>{tI18nComplete.raw('texta8e98b14ad73')}</CardDescription>
             </CardHeader>
             <CardFooter>
-              <CardButton href="https://docs.kortix.com" external>
+              <CardButton href="https://kortix-computer-app.netlify.app/docs" external>
                 {tI18nComplete.raw('textd942e3dc737b')}
               </CardButton>
             </CardFooter>
@@ -542,7 +542,7 @@ export function CardSection() {
             <CardButton icon={ArrowsClockwiseIcon} iconPosition="end">
               {tI18nComplete.raw('textfc62c144fc7a')}
             </CardButton>
-            <CardButton href="https://kortix.com" external>
+            <CardButton href="https://kortix-computer-app.netlify.app" external>
               {tI18nComplete.raw('text68c114ea9c8c')}
             </CardButton>
             <CardButton disabled>{tI18nComplete.raw('text75081b593d15')}</CardButton>

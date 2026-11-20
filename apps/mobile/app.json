@@ -16,10 +16,8 @@
       "bundleIdentifier": "com.kortix.app",
       "usesAppleSignIn": true,
       "associatedDomains": [
-        "applinks:kortix.com",
-        "applinks:www.kortix.com",
-        "applinks:staging.kortix.com",
-        "webcredentials:kortix.com"
+        "applinks:kortix-computer-app.netlify.app",
+        "webcredentials:kortix-computer-app.netlify.app"
       ],
       "infoPlist": {
         "UIViewControllerBasedStatusBarAppearance": false,
@@ -76,18 +74,18 @@
           "data": [
             {
               "scheme": "https",
-              "host": "kortix.com",
+              "host": "kortix-computer-app.netlify.app",
               "pathPrefix": "/share"
             },
             {
               "scheme": "https",
-              "host": "www.kortix.com",
-              "pathPrefix": "/share"
+              "host": "kortix-computer-app.netlify.app",
+              "path": "/auth/callback"
             },
             {
               "scheme": "https",
-              "host": "staging.kortix.com",
-              "pathPrefix": "/share"
+              "host": "kortix-computer-app.netlify.app",
+              "pathPrefix": "/invites"
             }
           ],
           "category": [
@@ -188,8 +186,8 @@
     "owner": "kortix",
     "runtimeVersion": "1.6.44",
     "updates": {
-      "url": "https://u.expo.dev/9fca3cff-a291-41c9-88b9-feb8053b990f",
-      "checkAutomatically": "ON_LOAD",
+      "enabled": false,
+      "checkAutomatically": "NEVER",
       "fallbackToCacheTimeout": 0
     }
   }

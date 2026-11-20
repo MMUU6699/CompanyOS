@@ -5,9 +5,9 @@
  */
 import type { GenuiSample } from '@kortix/shared/genui-samples';
 
-const PHOTO = 'https://kortix.com/banner.png';
+const PHOTO = 'https://kortix-computer-app.netlify.app/banner.png';
 /** An https URL that never loads: the neutral well and the image icon, in a box of the same size. */
-const BROKEN = 'https://kortix.com/does-not-exist.png';
+const BROKEN = 'https://kortix-computer-app.netlify.app/does-not-exist.png';
 
 export const MOBILE_EDGE_SAMPLES: readonly GenuiSample[] = [
   {

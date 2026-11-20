@@ -676,17 +676,13 @@ function SessionChatInputImpl({
             pastes={pasted.pastes}
             onRemovePaste={pasted.remove}
             onOpenPaste={openPastedText}
-            chip={
-              modelsLoading
-                ? null
-                : composerChip({
-                    connectModel: modelUnavailable,
-                    agentName: agent?.name,
-                    pendingAgentName,
-                    agentsLoading,
-                    modelName: model ? pickerModelName(model) : undefined,
-                  })
-            }
+            chip={composerChip({
+              connectModel: false,
+              agentName: agent?.name,
+              pendingAgentName,
+              agentsLoading,
+              modelName: undefined,
+            })}
             onChipPress={openModelSheet}
             accessory={
               auto.mode && auto.current ? (

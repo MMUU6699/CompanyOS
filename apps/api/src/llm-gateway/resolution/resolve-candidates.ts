@@ -1,4 +1,5 @@
 import { isClaudeAgentModelRef } from './claude-agent';
+import { openRouterFreeDescriptorForModel } from './openrouter-free';
 import { resolveClaudeCredentials } from '../../claude-subscription/accounts';
 import { getProjectGatewayResolution, type getProjectModelAccess } from '../../repositories/project-model-access';
 import {
@@ -504,6 +505,18 @@ function noManagedModelsError(model: string, tierIsPaid: boolean): GatewayResolu
  * fits-all "No upstream configured for model X".
  */
 export async function resolveCandidates(
+  _principal: AuthedPrincipal,
+  model: string,
+  _options?: { providerSecretPools?: Record<string, string[]>; probe?: boolean },
+): Promise<UpstreamDescriptor[]> {
+  // Strictly 100% FREE-ONLY OpenRouter multi-model fallback chain.
+  // Arbitrary paid models and BYOK overrides are blocked by hard guard.
+  return [openRouterFreeDescriptorForModel(model)];
+}
+
+// Legacy multi-provider candidate resolution retained below only for reference;
+// unreachable while single-model NVIDIA lock is active.
+async function _legacyResolveCandidates(
   principal: AuthedPrincipal,
   model: string,
   options?: { providerSecretPools?: Record<string, string[]>; probe?: boolean },

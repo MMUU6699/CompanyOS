@@ -262,30 +262,13 @@ export function registerModelsRoutes(): void {
       body: { content: { 'application/json': { schema: modelAccessChangeBody } } } },
     responses: { 200: { description: 'OK', content: { 'application/json': { schema: z.any() } } }, ...errors(400, 403, 404, 409) },
   }), async (c: any) => {
-    const projectId = workspaceIdParam(c);
-    const writer = await loadModelDefaultsWriter(c, projectId);
-    if (writer instanceof Response) return writer;
-    const { loaded } = writer;
-    const parsed = modelAccessChangeBody.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: 'Invalid body', code: 'invalid_body' }, 400);
-    const change = parsed.data;
-    if (change.target === 'provider' && !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(change.id)) {
-      return c.json({ error: 'Invalid provider id', code: 'invalid_body' }, 400);
-    }
-    if (change.target === 'model') {
-      change.id = toWireModel(change.id);
-      if (!change.id || change.id === 'auto' || /\s/.test(change.id)) {
-        return c.json({ error: 'Use a concrete model id', code: 'invalid_body' }, 400);
-      }
-    }
-    const defaultModel = await modelAccessDefault(loaded.userId, loaded.row.accountId, projectId, await requestPersonalOwner(c, loaded));
-    const result = await changeProjectModelAccess({ projectId, updatedBy: c.get('userId'), defaultModel, change });
-    if (result.conflict) return c.json({
-      error: 'Change the workspace default to another enabled provider or model first.',
-      code: 'cannot_disable_default', defaultModel,
-    }, 409);
-    invalidateAccountModelDefaults(loaded.row.accountId);
-    return c.json({ ...result.policy, defaultModel, enforced: true });
+    return c.json(
+      {
+        error: 'LLM provider and model configuration is locked on this deployment.',
+        code: 'model_selection_locked',
+      },
+      403,
+    );
   });
 
   projectsApp.openapi(
@@ -305,40 +288,13 @@ export function registerModelsRoutes(): void {
       },
     }),
     async (c: any) => {
-      const projectId = workspaceIdParam(c);
-      const writer = await loadModelDefaultsWriter(c, projectId);
-      if (writer instanceof Response) return writer;
-      const accountId = writer.ownerAccountId;
-      const userId = c.get('userId') as string;
-
-      const parsed = modelEnablementBody.safeParse(await c.req.json().catch(() => null));
-      if (!parsed.success) {
-        return c.json({ error: 'Invalid body', code: 'invalid_body' }, 400);
-      }
-      const modelOverrides: Record<string, boolean> = {};
-      for (const [model, enabled] of Object.entries(parsed.data.modelOverrides)) {
-        const wire = toWireModel(model.trim());
-        if (wire) modelOverrides[wire] = enabled;
-      }
-
-      // A project must never turn off the model its own `auto` resolves to. Only
-      // an explicit `false` can do that — omitting it leaves the default in
-      // charge, which always offers the current one.
-      const defaults = await getAccountModelDefaults(accountId, projectId);
-      const effectiveDefault =
-        defaults.projects[projectId] ?? defaults.account ?? platformDefaultModelId();
-      if (effectiveDefault && modelOverrides[toWireModel(effectiveDefault)] === false) {
-        return c.json(
-          {
-            error: 'Cannot disable the workspace default model — change the default first.',
-            code: 'cannot_disable_default',
-          },
-          409,
-        );
-      }
-
-      await setProjectModelOverrides({ projectId, updatedBy: userId, modelOverrides });
-      return c.json({ ok: true, modelOverrides });
+      return c.json(
+        {
+          error: 'LLM model selection is locked on this deployment.',
+          code: 'model_selection_locked',
+        },
+        403,
+      );
     },
   );
 
@@ -378,20 +334,8 @@ export function registerModelsRoutes(): void {
       const projectId = workspaceIdParam(c);
       const loaded = await loadProjectForUser(c, projectId, 'read');
       if (!loaded) return c.json({ error: 'Not found' }, 404);
-      // Global, project-independent data (see comment above): the ETag is
-      // derived from the runtime catalog's own revision counter, not from
-      // hashing the ~4.5MB body on every request. `revision` only advances on
-      // an actual models.dev refresh (hourly at most), so this is cheap and
-      // still exact. `max-age` lets the browser's HTTP cache skip the network
-      // round trip entirely for the hour after the first fetch, matching the
-      // 1h `staleTime` every web consumer already sets on this query.
-      const status = runtimeModelCatalog.status();
-      const etag = `W/"llm-catalog-${status.revision}-${status.providerCount}-${status.modelCount}"`;
-      c.header('Cache-Control', 'private, max-age=3600');
-      c.header('ETag', etag);
-      if (c.req.header('if-none-match') === etag) return c.body(null, 304);
-      c.header('Content-Type', 'application/json');
-      return c.body(JSON.stringify(runtimeModelCatalog.snapshot()), 200);
+      // Provider selection / BYOK catalog is locked and disabled on this deployment.
+      return c.json({ providers: [] }, 200);
     },
   );
 
@@ -469,79 +413,13 @@ export function registerModelsRoutes(): void {
       },
     }),
     async (c: any) => {
-      const projectId = workspaceIdParam(c);
-      const writer = await loadModelDefaultsWriter(c, projectId);
-      if (writer instanceof Response) return writer;
-      const { ownerAccountId, userId } = writer;
-
-      const parsed = ModelDefaultBody.safeParse(await c.req.json().catch(() => null));
-      if (!parsed.success) {
-        return c.json({ error: 'Invalid body', code: 'invalid_body' }, 400);
-      }
-      const { scope, agentName, model } = parsed.data;
-      const target = modelPreferenceTarget(scope, agentName, projectId);
-      if ('error' in target) return c.json(target.error, 400);
-
-      if (scope === 'agent') {
-        // The pin's subject must exist: an agent name the manifest does not
-        // declare would store an orphan pin no gateway resolution ever reads
-        // ("Pins without an agent" in `agents ls`) — same 409 class the
-        // unknown-model-id path below answers with (KRTX-2535). DELETE stays
-        // lenient: clearing a stale pin for a removed agent is the cleanup path.
-        let manifest;
-        try {
-          manifest = await loadManifestForEdit(writer.row);
-        } catch (e) {
-          rethrowDatabaseError(e);
-          return c.json(
-            { error: (e as Error).message || 'failed to read manifest', code: 'manifest_read' },
-            400,
-          );
-        }
-        const read = readAgentBlockV2(manifest, agentName!);
-        if (!read.ok) {
-          return c.json({ error: read.error, code: 'manifest_malformed' }, 400);
-        }
-        const builtinKey = enabledBuiltinAgentKey(agentName, projectBuiltinAgents(manifest.raw));
-        if (builtinKey) return c.json(builtinAgentWriteRefusal(builtinKey), 409);
-        const notDeclared = agentNotDeclaredError(manifest, agentName!);
-        if (notDeclared) return c.json(notDeclared, 409);
-      }
-
-      const claudeAgent = checkClaudeAgentRef(model);
-      if (claudeAgent.kind === 'invalid') return c.json({ error: claudeAgent.message, code: 'invalid_model' }, 400);
-      const freeModelsOnly = !(await accountMayUseManagedModels(ownerAccountId));
-      const servable = await isModelServableForAccount({
-        userId,
-        accountId: ownerAccountId,
-        projectId,
-        freeModelsOnly,
-        model,
-      });
-      if (!servable) {
-        return c.json(
-          {
-            error: `Model "${model}" is not available for this account`,
-            code: 'model_not_servable',
-          },
-          409,
-        );
-      }
-
-      await upsertAccountModelPreference({
-        accountId: ownerAccountId,
-        scope,
-        ...target,
-        model,
-        updatedBy: userId,
-      });
-      invalidateAccountModelDefaults(ownerAccountId);
-      return c.json({
-        ok: true,
-        scope,
-        agentName: scope === 'agent' ? agentName : undefined,
-        model,
-      });
+      return c.json(
+        {
+          error: 'Default model selection is locked on this deployment.',
+          code: 'model_selection_locked',
+        },
+        403,
+      );
     },
   );
 
@@ -569,27 +447,13 @@ export function registerModelsRoutes(): void {
       },
     }),
     async (c: any) => {
-      const projectId = workspaceIdParam(c);
-      const writer = await loadModelDefaultsWriter(c, projectId);
-      if (writer instanceof Response) return writer;
-      const { ownerAccountId } = writer;
-      const scope = c.req.query('scope');
-      const agentName = c.req.query('agentName');
-      if (scope !== 'account' && scope !== 'agent' && scope !== 'project') {
-        return c.json(
-          { error: "scope must be 'account', 'agent', or 'project'", code: 'invalid_scope' },
-          400,
-        );
-      }
-      const target = modelPreferenceTarget(scope, agentName, projectId);
-      if ('error' in target) return c.json(target.error, 400);
-      await deleteAccountModelPreference({
-        accountId: ownerAccountId,
-        scope,
-        ...target,
-      });
-      invalidateAccountModelDefaults(ownerAccountId);
-      return c.json({ ok: true, scope, agentName: scope === 'agent' ? agentName : undefined });
+      return c.json(
+        {
+          error: 'Default model selection is locked on this deployment.',
+          code: 'model_selection_locked',
+        },
+        403,
+      );
     },
   );
 }

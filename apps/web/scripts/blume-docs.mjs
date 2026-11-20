@@ -58,9 +58,10 @@ function newestMtimeMs(root) {
  * filesystem: skip the rebuild if the output is no older than every input.
  */
 function isPublicDocsUpToDate() {
-  const outputIndex = getBlumeDocsOutputPaths()[0];
-  if (!fs.existsSync(outputIndex)) return false;
-  const outputMtime = fs.statSync(outputIndex).mtimeMs;
+  const outputs = getBlumeDocsOutputPaths();
+  if (!outputs.every((p) => fs.existsSync(p))) return false;
+  if (process.env.NETLIFY || process.env.KORTIX_SKIP_BLUME_REBUILD === '1') return true;
+  const outputMtime = fs.statSync(outputs[0]).mtimeMs;
   return [CONTENT_DOCS, BLUME_CONFIG, ...BLUME_COMPONENTS].every((source) => outputMtime >= newestMtimeMs(source));
 }
 
@@ -102,7 +103,11 @@ export function buildBlumeDocs() {
   }
   try {
     if (isPublicDocsUpToDate()) return;
-    execFileSync('npx', ['blume', 'build'], { cwd: WEB_ROOT, stdio: 'inherit' });
+    execFileSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['blume', 'build'], {
+      cwd: WEB_ROOT,
+      stdio: 'inherit',
+      shell: process.platform === 'win32',
+    });
     fs.rmSync(PUBLIC_DOCS, { recursive: true, force: true });
     fs.mkdirSync(PUBLIC_DOCS, { recursive: true });
     fs.cpSync(DIST, PUBLIC_DOCS, { recursive: true });

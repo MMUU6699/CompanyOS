@@ -49,6 +49,9 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
   // A project session that's provisioning — the middle pane shows a connecting
   // state and the project-sessions poll opens it once its sandbox is ready.
   const [connectingProjectSessionId, setConnectingProjectSessionId] = useState<string | null>(null);
+  // Immediate snapshot of the tapped session row so title + runtime_session_id
+  // are available on frame 0 without waiting for `useProjectSession`.
+  const [connectingSnapshot, setConnectingSnapshot] = useState<ProjectSession | null>(null);
   // The same id, current for callbacks that closed over an older render
   // (`goHome` runs from navigation listeners).
   const connectingIdRef = useRef<string | null>(null);
@@ -388,6 +391,7 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
       freshSessionIdRef.current = null;
       // Connecting first, the open thread cleared after: never a render that
       // reads project home (see connectToProjectSession).
+      setConnectingSnapshot(ps);
       setConnectingProjectSessionId(ps.session_id);
       navigateToSession(null);
     },
@@ -464,7 +468,13 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
   // thread it becomes: the session's own title once it has one, else the
   // just-sent prompt, else "New session".
   const connectingSessionRow = useProjectSession(projectId, connectingProjectSessionId).data ?? null;
-  const connectingRow = connectingProjectSessionId ? connectingSessionRow : activeProjectSession;
+  const matchedConnectingSnapshot =
+    connectingSnapshot && connectingSnapshot.session_id === connectingProjectSessionId
+      ? connectingSnapshot
+      : projectSessions.find((item) => item.session_id === connectingProjectSessionId) ?? null;
+  const connectingRow = connectingProjectSessionId
+    ? (connectingSessionRow ?? matchedConnectingSnapshot)
+    : activeProjectSession;
   const connectingFirstPrompt = connectingProjectSessionId
     ? firstPromptRef.current[connectingProjectSessionId]
     : undefined;

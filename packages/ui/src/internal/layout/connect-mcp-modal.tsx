@@ -31,7 +31,7 @@ import { cn } from '../lib/utils';
 
 /** The MCP endpoint: `<api origin>/v1/mcp`. */
 export function mcpUrl(backendUrl: string | undefined): string {
-  const base = stripTrailingSlashes(backendUrl || 'https://api.kortix.com/v1');
+  const base = stripTrailingSlashes(backendUrl || 'https://kortix-api-production-20b48504.up.railway.app/v1');
   return `${base.endsWith('/v1') ? base : `${base}/v1`}/mcp`;
 }
 

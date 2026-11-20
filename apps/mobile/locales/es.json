@@ -521,8 +521,8 @@
   "billing": {
     "loadingPaywall": "Cargando planes...",
     "checkoutUnavailable": "Checkout móvil no disponible",
-    "checkoutUnavailableMessage": "Para suscribirte a un plan, visita kortix.com en la web.",
-    "goToWeb": "Ir a kortix.com",
+    "checkoutUnavailableMessage": "Para suscribirte a un plan, visita la aplicación web de Kortix.",
+    "goToWeb": "Abrir aplicación web de Kortix",
     "billingStatus": "Estado de Facturación",
     "loading": "Cargando información de facturación...",
     "error": "Error al cargar información de facturación",
@@ -550,8 +550,8 @@
     "choosePackageBoost": "Elige un paquete y aumenta tu saldo de créditos",
     "title": "Facturación",
     "cancelsOn": "Se cancela el",
-    "manageOnWeb": "Gestionar en kortix.com",
-    "openWebFailed": "No se pudo abrir kortix.com. Inténtalo de nuevo."
+    "manageOnWeb": "Gestionar en la aplicación web",
+    "openWebFailed": "No se pudo abrir la aplicación web. Inténtalo de nuevo."
   },
   "theme": {
     "title": "Apariencia",
@@ -573,12 +573,12 @@
   "beta": {
     "title": "Funciones Beta",
     "webSupportTitle": "Totalmente Compatible en Web",
-    "webSupportDescription": "Disponible en Kortix.com. Próximamente en móvil—aún en desarrollo aquí.",
-    "visitKortix": "Visitar Kortix.com",
+    "webSupportDescription": "Disponible en la aplicación web de Kortix. Próximamente en móvil—aún en desarrollo aquí.",
+    "visitKortix": "Abrir aplicación web de Kortix",
     "advancedFeatures": "Funciones Avanzadas",
     "mobileBeta": "Beta Móvil",
     "pleaseNote": "Ten en Cuenta",
-    "mobileWarning": "En desarrollo en móvil y puede tener problemas. Para la mejor experiencia, usa Kortix.com."
+    "mobileWarning": "En desarrollo en móvil y puede tener problemas. Para la mejor experiencia, usa la aplicación web de Kortix."
   },
   "accountDeletion": {
     "title": "Eliminar Cuenta",
@@ -1304,7 +1304,7 @@
     "createTitle": "Crea un espacio de trabajo",
     "createBody": "Un espacio de trabajo es donde tu empresa trabaja con Kortix: personas, agentes y todo lo que crean.",
     "createOnWebTitle": "Crear un espacio de trabajo en la web",
-    "createOnWebLine": "Los espacios de trabajo se crean en kortix.com.",
+    "createOnWebLine": "Los espacios de trabajo se crean en la aplicación web de Kortix.",
     "invitedHint": "¿Te invitaron? Abre el enlace de invitación de tu correo, o pide a un administrador que invite a {{email}}.",
     "yours": "Tu espacio de trabajo",
     "openNamed": "Abrir {{workspace}}",
@@ -1336,7 +1336,7 @@
     "name": "Nombre del espacio de trabajo",
     "billing": "Facturación",
     "billingAndMembers": "Facturación y miembros",
-    "onWeb": "En kortix.com",
+    "onWeb": "En la aplicación web",
     "members": "Miembros",
     "git": "Git",
     "auditLog": "Registro de auditoría",

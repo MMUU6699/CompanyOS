@@ -200,76 +200,12 @@ export function ModelSection({
 
   return (
     <>
-      <EditorSection
-        title={tI18nComplete.raw('text5e2c614c23f0')}
-        description={tI18nComplete.raw('text32398dbb68e2')}
-        lead={lead}
-      >
-        {/* "Provider model", not "Model": the section is already titled Model,
-          and a row that repeats its section's name reads as a typo. */}
-        <SettingRow
-          label={tI18nComplete.raw('text34455bf1d857')}
-          help={
-            oc.model ? (
-              <InlineAction onClick={() => setOc('model', undefined)}>
-                {tI18nComplete.raw('text9db60344e984')}
-              </InlineAction>
-            ) : (
-              tI18nComplete.raw('text64f405e80a8d')
-            )
-          }
+      {showPrompt ? (
+        <EditorSection
+          title={tI18nComplete.raw('text5e2c614c23f0')}
+          description={tI18nComplete.raw('text32398dbb68e2')}
+          lead={lead}
         >
-          <div className="flex sm:justify-end">
-            <ModelSelector
-              models={models}
-              providers={providers}
-              selectedModel={selectedModelKey}
-              unsetLabel={tI18nComplete.raw('texte8cb80e5c5cb')}
-              onSelect={(m) => setOc('model', m ? modelKeyToWire(m) : undefined)}
-            />
-          </div>
-        </SettingRow>
-
-        {variantChoices.length > 0 ? (
-          <SettingRow
-            label={tI18nComplete.raw('text264c28cbf01c')}
-            help={
-              oc.variant
-                ? tI18nComplete.raw('text4dd21464c579')
-                : tI18nComplete.raw('textf39c806f5724')
-            }
-          >
-            <div className="flex sm:justify-end">
-              <ReasoningEffortSelector
-                variants={variantChoices}
-                selectedVariant={oc.variant ?? null}
-                onVariantChange={(v) => setOc('variant', v ?? undefined)}
-              />
-            </div>
-          </SettingRow>
-        ) : (
-          <SettingRow
-            label={tI18nComplete.raw('text3f19fe84a2de')}
-            help={
-              selectedModelKey
-                ? tI18nComplete.raw('text0443f619cb33')
-                : tI18nComplete.raw('text6376d74077c0')
-            }
-          >
-            <Input
-              aria-label={tI18nComplete.raw('text3f19fe84a2de')}
-              value={oc.variant ?? ''}
-              placeholder={tI18nComplete.raw('text352a25678fb9')}
-              variant="popover"
-              className="h-9 w-full text-sm"
-              onChange={(e) => setOc('variant', e.target.value)}
-            />
-          </SettingRow>
-        )}
-
-        {/* A wall of text most agents never set — collapsed, like the tool
-          permissions at the foot of the editor. */}
-        {showPrompt ? (
           <SettingBlock
             label={tI18nComplete.raw('text561257c019e5')}
             help={tI18nComplete.raw('textad63817393a7')}
@@ -300,14 +236,13 @@ export function ModelSection({
               </DisclosureContent>
             </Disclosure>
           </SettingBlock>
-        ) : null}
-      </EditorSection>
+        </EditorSection>
+      ) : null}
 
-      {/* Its own section, rows open: the page gives each topic a full
-          column, so nothing needs hiding behind a disclosure. */}
       <EditorSection
         title={tI18nComplete.raw('text6d06116595a9')}
         description={tI18nComplete.raw('text33439eb47c9a')}
+        lead={!showPrompt && lead}
       >
         <SliderRow
           label={tI18nComplete.raw('textb958ce8b871a')}
@@ -348,7 +283,6 @@ export function ModelSection({
             }
           />
         </SettingRow>
-        <ProviderOptionsRow value={oc.options} onChange={(next) => setOc('options', next)} />
       </EditorSection>
     </>
   );

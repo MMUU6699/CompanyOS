@@ -1,8 +1,6 @@
 const MOBILE_CALLBACK_FLAG = 'mobile_callback';
 const KORTIX_CALLBACK_HOSTS = new Set([
-  'kortix.com',
-  'www.kortix.com',
-  'staging.kortix.com',
+  'kortix-computer-app.netlify.app',
 ]);
 
 /**
@@ -34,7 +32,7 @@ export function isMobileAuthCallbackUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (
-      parsed.protocol === 'kortix:' &&
+      (parsed.protocol === 'kortix:' || parsed.protocol === 'exp+kortix:') &&
       parsed.hostname === 'auth' &&
       parsed.pathname === '/callback'
     ) {
@@ -56,7 +54,7 @@ export function isMobileRegistrationHandoffUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (
-      parsed.protocol === 'kortix:' &&
+      (parsed.protocol === 'kortix:' || parsed.protocol === 'exp+kortix:') &&
       parsed.hostname === 'auth' &&
       parsed.pathname === '/callback'
     ) {

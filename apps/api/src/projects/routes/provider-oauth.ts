@@ -168,78 +168,11 @@ export function registerProviderOauthRoutes(): void {
       },
     }),
     async (c: any) => {
-    const projectId = workspaceIdParam(c);
-    const provider = c.req.param('provider');
-    const body = await readJsonObject(c);
-    const loaded = await loadProjectForUser(c, projectId, 'read');
-    if (!loaded) return c.json({ error: 'Not found' }, 404);
-
-    const cfg = oauthProvider(provider);
-    if (!cfg) {
-      return c.json({ error: `OAuth device flow is not available for "${provider}"` }, 400);
-    }
-
-    const parsed = await parseOAuthStartRequest(c, body, cfg, loaded, projectId);
-    if ('response' in parsed) return parsed.response;
-    const { resourceLabel, resourceId, sharing } = parsed.request;
-    // A shared credential is a project SECRET WRITE (the device flow persists it
-    // via writeOAuthLoginSecret on poll). Gate on the leaf so a custom role can
-    // withhold it and the agent-grant fold applies — closing the gap where the
-    // flow wrote a shared credential behind only loadProjectForUser('read'). A
-    // private (owner-only) credential is the member's own, so read still suffices.
-    // A named account restricted to its owner alone is owner-only too, however
-    // the client spells it; so is reconnecting your own account. The legacy
-    // unnamed login treats `members` as shared, so this applies to named ones only.
-    // The poll step is reachable only with the project-key-encrypted flow handle
-    // minted here, so gating start transitively protects the write on poll.
-    const ownerOnly = resourceId !== null ||
-      (resourceLabel !== null && sharingIsOwnerOnly(sharing, loaded.userId));
-    if (sharing?.mode !== 'private' && !ownerOnly) {
-      await assertProjectCapability(c, loaded.userId, loaded.row.accountId, projectId, PROJECT_ACTIONS.PROJECT_SECRET_WRITE);
-    }
-
-    // Request a device code straight from the provider — a couple HTTPS calls, no
-    // subprocess, no server-side flow record. Everything `poll` needs is sealed
-    // into the opaque `flow_id` (encrypted with the project key), so any replica
-    // can serve any poll and there's nothing to leak or OOM.
-    let challenge;
-    try {
-      challenge = await cfg.start();
-    } catch (err) {
-      rethrowDatabaseError(err);
-      return c.json({
-        error: err instanceof Error ? err.message : `Failed to start ${cfg.label} authorization`,
-      }, 502);
-    }
-
-    const expiresAt = Date.now() + DEVICE_AUTH_TTL_MS;
-    const flowId = encryptProjectSecret(
-      projectId,
-      JSON.stringify({
-        p: provider,
-        d: challenge.handle,
-        u: challenge.userCode,
-        s: sharing ?? null,
-        uid: loaded.userId,
-        ...(resourceLabel === null ? {} : { l: resourceLabel, rid: randomUUID() }),
-        ...(resourceId === null ? {} : { rid: resourceId, rc: 1 }),
-        e: expiresAt,
-        i: Math.max(challenge.intervalMs, OAUTH_POLL_INTERVAL_MS),
-      }),
-    );
-
-    return c.json({
-      flow_id: flowId,
-      verification_url: challenge.verificationUrl,
-      user_code: challenge.userCode,
-      expires_at: expiresAt,
-      interval_ms: Math.max(challenge.intervalMs, OAUTH_POLL_INTERVAL_MS),
-    });
-  },
+      return c.json({ error: 'External LLM provider OAuth is disabled on this deployment.', code: 'model_selection_locked' }, 403);
+    },
   );
 
   // ─── POST /v1/projects/:projectId/oauth/:provider/poll ─────────────────────
-  // Any replica: read the shared flow row; on success persist the secret.
   projectsApp.openapi(
     createRoute({
       method: 'post',
@@ -247,117 +180,23 @@ export function registerProviderOauthRoutes(): void {
       tags: ['secrets'],
       summary: 'Poll an LLM provider OAuth login',
       ...auth,
-        request: {
-          params: z.object({ workspaceId: z.string(), provider: z.string() }),
-          body: { content: { 'application/json': { schema: lenientBody({
-              flow_id: z.string().openapi({ description: 'Flow id returned by start.' }),
-            }) } } },
-        },
+      request: {
+        params: z.object({ workspaceId: z.string(), provider: z.string() }),
+        body: { content: { 'application/json': { schema: lenientBody({
+          flow_id: z.string().openapi({ description: 'Flow id returned by start.' }),
+        }) } } },
+      },
       responses: {
-          200: json(z.any(), 'Poll result'),
-          ...errors(400, 401, 404),
+        200: json(z.any(), 'Poll result'),
+        ...errors(400, 401, 403, 404),
       },
     }),
     async (c: any) => {
-    const projectId = workspaceIdParam(c);
-    const provider = c.req.param('provider');
-    const body = await readJsonObject(c);
-    const loaded = await loadProjectForUser(c, projectId, 'read');
-    if (!loaded) return c.json({ error: 'Not found' }, 404);
-
-    const flowId = normalizeString(body.flow_id);
-    if (!flowId) return c.json({ error: 'flow_id is required' }, 400);
-    const cfg = oauthProvider(provider);
-    if (!cfg) return c.json({ error: `OAuth device flow is not available for "${provider}"` }, 400);
-
-    // Decrypt the opaque flow handle. The key is project-scoped, so a handle from
-    // another project — or a tampered one — simply won't decrypt → expired.
-    let state: { p?: string; d?: string; u?: string; s?: unknown; uid?: string; e?: number; i?: number; l?: string; rid?: string; rc?: number };
-    try {
-      state = JSON.parse(decryptProjectSecret(projectId, flowId));
-    } catch {
-      return c.json({ status: 'expired' });
-    }
-    // Only the member who started it may poll it, only for the provider it was
-    // started for (handles sealed before `p` existed are ChatGPT), and only
-    // before it expires.
-    if (
-      !state.d || !state.u || (state.p ?? 'openai') !== provider ||
-      state.uid !== loaded.userId ||
-      typeof state.e !== 'number' || Date.now() > state.e
-    ) {
-      return c.json({ status: 'expired' });
-    }
-    if ((state.l || state.rc) && state.rid) {
-      const [member] = await accountMemberRow(loaded.row.accountId, loaded.userId);
-      if (!member) return c.json({ status: 'failed', error: 'Account membership is required' });
-    }
-
-    const result = await cfg.poll(state.d, state.u);
-    if (result.status === 'pending') {
-      // Never ask a client to poll faster than the provider's own interval: the
-      // CLI adopts next_poll_ms, and 3 s against OpenCode's 5 s broke dev sign-in.
-      return c.json({ status: 'pending', next_poll_ms: Math.max(state.i ?? 0, OAUTH_POLL_INTERVAL_MS) });
-    }
-    if (result.status === 'failed') {
-      return c.json({ status: 'failed', error: result.error });
-    }
-
-    if (state.rc && state.rid) {
-      const reconnected = await reconnectProviderAccount({
-        secretId: state.rid, accountId: loaded.row.accountId, userId: loaded.userId,
-        projectId, value: result.authJson, kind: accountKind(cfg),
-      });
-      if (!reconnected) {
-        return c.json({ status: 'failed', error: `This ${cfg.label} account is no longer available. Add it again.` });
-      }
-      capturePersonEvent(c, loaded, projectId, 'provider_configured', { provider: String(provider), method: 'oauth' });
-      return c.json({ status: 'success', credential: {
-        provider_id: cfg.resourceProviderId, secret_id: reconnected.secretId, label: reconnected.label,
-        expires_in_ms: authExpiresInMs(result.authJson), updated_at: new Date().toISOString(),
-      } });
-    }
-
-    // The sealed resource id makes a completed device flow idempotent. A new
-    // device flow gets a new resource; it never overwrites another user's login.
-    if (state.l && state.rid) {
-      const secretId = await writeProviderAccount({
-        secretId: state.rid, accountId: loaded.row.accountId, userId: loaded.userId,
-        label: state.l, value: result.authJson, projectId, kind: accountKind(cfg),
-        sharing: state.s ? (parseSharingIntent(state.s, loaded.userId) ?? undefined) : undefined,
-      });
-      capturePersonEvent(c, loaded, projectId, 'provider_configured', { provider: String(provider), method: 'oauth' });
-      return c.json({ status: 'success', credential: {
-        provider_id: cfg.resourceProviderId, secret_id: secretId, label: state.l,
-        expires_in_ms: authExpiresInMs(result.authJson), updated_at: new Date().toISOString(),
-      } });
-    }
-
-    // No label sent (an older client): the login is still a named account,
-    // the one store of provider credentials (secrets/llm-credential-move.ts),
-    // with the product's name as its label. `sharing` keeps its old meaning:
-    // none or `project` is the whole workspace, `private` only the caller.
-    const sharing = state.s ? (parseSharingIntent(state.s, loaded.userId) ?? undefined) : undefined;
-    await writeProviderAccount({
-      // One id per device flow, so a repeated completion writes one row.
-      secretId: flowSecretId(state.d), accountId: loaded.row.accountId, userId: loaded.userId,
-      label: cfg.label, value: result.authJson, projectId, kind: accountKind(cfg), sharing,
-    });
-
-    capturePersonEvent(c, loaded, projectId, 'provider_configured', { provider: String(provider), method: 'oauth' });
-    return c.json({
-      status: 'success',
-      credential: {
-        provider_id: provider,
-        expires_in_ms: authExpiresInMs(result.authJson),
-        updated_at: new Date().toISOString(),
-      },
-    });
-  },
+      return c.json({ error: 'External LLM provider OAuth is disabled on this deployment.', code: 'model_selection_locked' }, 403);
+    },
   );
 
   // ─── GET /v1/projects/:projectId/oauth ─────────────────────────────────────
-  // List configured OAuth credentials (derived from the saved project secrets).
   projectsApp.openapi(
     createRoute({
       method: 'get',
@@ -365,50 +204,18 @@ export function registerProviderOauthRoutes(): void {
       tags: ['secrets'],
       summary: 'List connected LLM provider logins',
       ...auth,
-        request: { params: z.object({ workspaceId: z.string() }) },
+      request: { params: z.object({ workspaceId: z.string() }) },
       responses: {
-          200: json(z.any(), 'Configured OAuth credentials'),
-          ...errors(401, 404),
+        200: json(z.any(), 'Configured OAuth credentials'),
+        ...errors(401, 404),
       },
     }),
     async (c: any) => {
-    const projectId = workspaceIdParam(c);
-    const loaded = await loadProjectForUser(c, projectId, 'read');
-    if (!loaded) return c.json({ error: 'Not found' }, 404);
-    await assertProjectCapability(c, loaded.userId, loaded.row.accountId, projectId, PROJECT_ACTIONS.PROJECT_CONNECTOR_READ);
-
-    const items: Array<{ provider_id: string; expires_in_ms: number | null; updated_at: string }> = [];
-    for (const providerId of ['openai', ...Object.keys(OPENCODE_CONSOLE_PROVIDERS)]) {
-      const cfg = oauthProvider(providerId);
-      if (!cfg) continue;
-      const credential = await resolveProjectSecretForConsumer({
-        projectId,
-        accountId: loaded.row.accountId,
-        actorUserId: loaded.userId,
-        principalUserId: await requestPersonalOwner(c, loaded),
-        name: cfg.secretName,
-        consumer: 'llm_gateway',
-      });
-      // An OpenCode key secret holding a plain API key is not a login.
-      if (!credential || !cfg.isLogin(credential.value)) continue;
-      items.push({
-        provider_id: providerId,
-        expires_in_ms: authExpiresInMs(credential.value),
-        updated_at: credential.updatedAt.toISOString(),
-      });
-    }
-
-    return c.json({ items });
-  },
+      return c.json({ items: [] });
+    },
   );
 
   // ─── DELETE /v1/projects/:projectId/oauth/:provider ────────────────────────
-  // Remove an OAuth credential (deletes the backing secret).
-  // The login can be a per-user PRIVATE row (`owner_user_id` set) or the shared
-  // project row. The delete covers exactly the rows `loadSecretViewsForUser`
-  // shows the caller: the caller's own private rows, plus the shared row when
-  // the caller may manage shared secrets. Another member's private login is
-  // never touched.
   projectsApp.openapi(
     createRoute({
       method: 'delete',
@@ -416,60 +223,14 @@ export function registerProviderOauthRoutes(): void {
       tags: ['secrets'],
       summary: 'Disconnect an LLM provider login',
       ...auth,
-        request: { params: z.object({ workspaceId: z.string(), provider: z.string() }) },
+      request: { params: z.object({ workspaceId: z.string(), provider: z.string() }) },
       responses: {
-          200: json(z.any(), 'OK'),
-          ...errors(401, 403, 404),
+        200: json(z.any(), 'OK'),
+        ...errors(401, 403, 404),
       },
     }),
     async (c: any) => {
-    const projectId = workspaceIdParam(c);
-    const provider = c.req.param('provider');
-    const loaded = await loadProjectForUser(c, projectId, 'read');
-    if (!loaded) return c.json({ error: 'Not found' }, 404);
-    await assertProjectCapability(c, loaded.userId, loaded.row.accountId, projectId, PROJECT_ACTIONS.PROJECT_CONNECTOR_WRITE);
-
-    const cfg = oauthProvider(provider);
-    if (!cfg) return c.json({ error: 'Not found' }, 404);
-
-    // Same test the GET secrets route uses for `can_manage_shared`.
-    const canManageShared = await projectCapabilityAllowed(c, loaded.userId, loaded.row.accountId, projectId, PROJECT_ACTIONS.PROJECT_SECRET_WRITE);
-    const ownPrivate = eq(projectSecrets.ownerUserId, loaded.userId);
-
-    await runAuditedTransaction(
-      async (tx) => {
-        const removed = await tx
-          .delete(projectSecrets)
-          .where(
-            and(
-              eq(projectSecrets.projectId, projectId),
-              eq(projectSecrets.name, cfg.secretName),
-              canManageShared ? or(ownPrivate, isNull(projectSecrets.ownerUserId)) : ownPrivate,
-            ),
-          )
-          .returning({ secretId: projectSecrets.secretId });
-        // A login the backfill moved lives on as a named account: disconnect
-        // that copy too, or the old client's disconnect changes nothing.
-        await deleteNamedCopiesOfLegacySecrets(tx, loaded.row.accountId, removed.map((row) => row.secretId));
-      },
-      () => ({
-        accountId: loaded.row.accountId,
-        projectId,
-        actorUserId: loaded.userId,
-        actorType: 'human',
-        source: 'api',
-        action: 'secret.oauth.disconnected',
-        resourceType: 'project_secret',
-        metadata: {
-          identifier: cfg.secretName,
-          consumer: 'llm_gateway',
-          scope: canManageShared ? 'own_private_and_shared' : 'own_private',
-        },
-      }),
-    );
-    void propagateProjectSecretsToActiveSandboxes(projectId, { refreshModels: isGatewayManagedEnv(cfg.secretName) });
-
-    return c.json({ ok: true });
-  },
+      return c.json({ error: 'External LLM provider OAuth is disabled on this deployment.', code: 'model_selection_locked' }, 403);
+    },
   );
 }

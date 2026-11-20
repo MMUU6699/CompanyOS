@@ -11,7 +11,7 @@
 import { KORTIX_WEB_URL } from './kortix-web';
 
 /** The web hosts whose links the app reads (share links, invite links). */
-export const KORTIX_LINK_HOSTS = new Set(['kortix.com', 'www.kortix.com', 'staging.kortix.com']);
+export const KORTIX_LINK_HOSTS = new Set(['kortix-computer-app.netlify.app']);
 
 /** `scheme://authority/path?query#fragment`, each part kept verbatim. */
 export const URL_PARTS = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i;

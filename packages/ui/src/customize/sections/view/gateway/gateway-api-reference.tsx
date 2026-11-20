@@ -77,7 +77,7 @@ with client.messages.stream(
 
 /** The gateway origin a reader would type: the env-correct one, else prod. */
 export function gatewayBase(gatewayUrl: string | null): string {
-  return gatewayUrl ?? 'https://gateway.kortix.com';
+  return gatewayUrl ?? 'https://kortix-api-production-20b48504.up.railway.app/v1/llm';
 }
 
 type QuickTab = 'curl' | 'python' | 'anthropic';

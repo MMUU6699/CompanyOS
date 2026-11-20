@@ -5998,7 +5998,7 @@ const catalog = {
       "text6dc0b331852f": "Agents, skills, tools, connectors and schedules are files in a repo. Edit them in your IDE, ship them with one command.",
       "text1cd4ee467781": "For humans",
       "text04acce351310": "For agents",
-      "text9f5c9fa004f0": "Install the Kortix CLI with `curl -fsSL https://kortix.com/install | bash`, then run `kortix system-skills` to learn how to drive Kortix.",
+      "text9f5c9fa004f0": "Install the Kortix CLI with `curl -fsSL https://kortix-computer-app.netlify.app/install | bash`, then run `kortix system-skills` to learn how to drive Kortix.",
       "text69423babe8e6": "File contents",
       "text2efb4a036449": "Agents are sandboxes.",
       "textb7bdfef0884d": "Every agent runs in its own disposable cloud VM, on its own git branch. Spin up thousands in parallel. Nothing is shared between runs.",

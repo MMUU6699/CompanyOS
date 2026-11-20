@@ -312,22 +312,15 @@ export function ProjectHome({
     }),
     [levels, variant, variantKey, setStoredVariant],
   );
-  // A project that offers no model: the chip asks to connect one, and Send
-  // opens the connect sheet instead of starting a session (KRTX-251).
-  const modelUnavailable = isModelUnavailable({
-    loading: modelsLoading,
-    modelCount: offeredModelCount(models),
+  // Backend locks a single always-available model (NVIDIA Gemma 4 31B).
+  const modelUnavailable = false;
+  // The chip names only the agent; model selection is disabled.
+  const chip = composerChip({
+    connectModel: false,
+    agentName,
+    agentsLoading: !projectAgents,
+    modelName: null,
   });
-  // The chip names the agent; the model name stands in when no agent
-  // resolves. While the agents or the models load, the chip stays hidden.
-  const chip = modelsLoading
-    ? null
-    : composerChip({
-        connectModel: modelUnavailable,
-        agentName,
-        agentsLoading: !projectAgents,
-        modelName: activeModel ? pickerModelName(activeModel) : null,
-      });
   const openConnectSheet = React.useCallback(() => {
     connectSheetRef.current?.open();
   }, []);

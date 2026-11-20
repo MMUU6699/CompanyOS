@@ -32,41 +32,13 @@ export function registerGatewayProvidersRoutes(): void {
       },
     }),
     async (c: any) => {
-      const projectId = workspaceIdParam(c);
-      const providerId = c.req.param('providerId');
-      const loaded = await loadProjectForUser(c, projectId, 'read');
-      if (!loaded) return c.json({ error: 'Not found' }, 404);
-      await assertProjectCapability(
-        c,
-        loaded.userId,
-        loaded.row.accountId,
-        projectId,
-        PROJECT_ACTIONS.PROJECT_SECRET_READ,
+      return c.json(
+        {
+          error: 'External LLM provider verification is disabled on this deployment.',
+          code: 'model_selection_locked',
+        },
+        403,
       );
-
-      const principal: AuthedPrincipal = {
-        userId: c.get('userId'),
-        accountId: loaded.row.accountId,
-        projectId,
-      };
-      // The ping is a real (if tiny) paid upstream call for a platform-fee-billed
-      // BYOK project — it must respect an already-exceeded project budget like
-      // any other gateway call (see playground's identical guard above). Caught
-      // rather than left to propagate: a budget block is exactly the "couldn't
-      // verify" case this endpoint already models, not a hard failure.
-      try {
-        await assertGatewayBudget(principal);
-      } catch (err) {
-        if (!(err instanceof GatewayBudgetExceededError)) throw err;
-        return c.json({
-          status: 'unknown',
-          message: err instanceof Error ? err.message : 'Project budget exceeded — try again later.',
-          checked_at: new Date().toISOString(),
-        });
-      }
-      const result = await verifyProviderConnection(principal, providerId);
-      capturePersonEvent(c, loaded, projectId, 'provider_verified', { provider: providerId, state: result.status });
-      return c.json({ ...result, checked_at: new Date().toISOString() });
     },
   );
 }

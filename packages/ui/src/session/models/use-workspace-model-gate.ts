@@ -40,43 +40,9 @@ const BLOCKED_RECHECK_MS = 15_000;
  * (`qk.project.modelPicker`), the one the composer, the model picker and the
  * shell prefetch read, so it adds no request to a workspace load.
  */
-export function useWorkspaceModelGate(projectId: string): WorkspaceModelGateView {
-  const viewerId = useUiViewerId();
-  // A program agent runs code instead of a model (flag `program_agents`), so a
-  // project that turned them on may work with no model at all.
-  const programAgents = useFeatureFlag(projectId, 'program_agents').enabled;
-  const enabled = !!projectId && !programAgents;
-
-  const query = useQuery({
-    queryKey: qk.project.modelPicker(projectId),
-    queryFn: () => getWorkspaceModelPicker(projectId),
-    enabled,
-    ...contract('config'),
-    retry: false,
-    refetchInterval: (current) =>
-      current.state.data && !flattenCatalog(current.state.data).some(isRunnableModel)
-        ? BLOCKED_RECHECK_MS
-        : false,
-  });
-
-  const models = useMemo(() => (query.data ? flattenCatalog(query.data) : undefined), [query.data]);
-  // Read once per viewer and workspace: the write below must not flip a
-  // decision that is already on screen.
-  const rememberedReady = useMemo(() => readModelReady(viewerId, projectId), [viewerId, projectId]);
-
-  const view = resolveWorkspaceModelGate({
-    enabled,
-    models,
-    failed: query.isError,
-    rememberedReady,
-  });
-
-  useEffect(() => {
-    // Only a server answer is recorded; a remembered or failed-open verdict is not.
-    if (enabled && models) writeModelReady(viewerId, projectId, view === 'open');
-  }, [enabled, models, projectId, view, viewerId]);
-
-  return view;
+export function useWorkspaceModelGate(_projectId: string): WorkspaceModelGateView {
+  // Backend locks a single always-available model (NVIDIA Gemma 4 31B); never block workspace access.
+  return 'open';
 }
 
 function flattenCatalog(catalog: Parameters<typeof projectLlmCatalogToProviderList>[0]) {

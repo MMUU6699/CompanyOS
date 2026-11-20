@@ -1,32 +1,21 @@
-import { config } from '../../config';
-import { managedTransportAvailable } from '../resolution/descriptors';
-import { managedLineup, resolvePlatformDefaultModelId, type ManagedModel } from './managed-models';
+import { openRouterFreeManagedModel, primaryOpenRouterFreeModelId } from '../resolution/openrouter-free';
+import type { ManagedModel } from './managed-models';
 
 /**
- * The managed lineup this deployment can serve now: Platinum's list, when the
- * Platinum key is present. Read live: the lineup refreshes in the background.
- *
- * Kept apart from `managed-models.ts` so the lineup never imports the
- * resolution layer (`descriptors.ts` imports `ManagedModel` from it).
+ * Locked 100% FREE-ONLY OpenRouter managed lineup.
  */
 export function servedManagedModels(): readonly ManagedModel[] {
-  return managedLineup().filter(managedTransportAvailable);
+  return [openRouterFreeManagedModel()];
 }
 
 /**
- * The platform default model this deployment can actually serve. Read this
- * anywhere a route ADVERTISES the default (`/model-picker`, `/model-defaults`)
- * or RESOLVES it (gateway routing) — never `config.LLM_GATEWAY_DEFAULT_MODEL`
- * directly, which is only what the operator asked for.
+ * Locked platform default model (Primary `:free` OpenRouter model).
  */
 export function platformDefaultModelId(): string {
-  return resolvePlatformDefaultModelId(config.LLM_GATEWAY_DEFAULT_MODEL ?? '', servedManagedModels());
+  return primaryOpenRouterFreeModelId();
 }
 
-/** The platform vision model: the configured one when served, else the first served model that reads images. */
+/** Locked platform vision model (100% free OpenRouter chain includes VL fallback). */
 export function platformVisionModelId(): string {
-  const configured = (config.LLM_GATEWAY_VISION_MODEL ?? '').trim();
-  const served = servedManagedModels();
-  if (configured && (configured.includes('/') || served.some((m) => m.id === configured && m.vision))) return configured;
-  return served.find((m) => m.vision)?.id ?? configured;
+  return primaryOpenRouterFreeModelId();
 }

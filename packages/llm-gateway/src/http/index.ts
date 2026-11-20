@@ -1,2 +1,6 @@
-export { callUpstream } from './call-upstream';
+export {
+  assertFreeOpenRouterModelId,
+  callUpstream,
+  isAllowedFreeOpenRouterModelId,
+} from './call-upstream';
 export type { CallUpstreamOptions, FetchImpl } from './call-upstream';

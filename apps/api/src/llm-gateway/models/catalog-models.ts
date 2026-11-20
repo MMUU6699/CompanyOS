@@ -10,6 +10,7 @@ import { resolveCatalogUpstream } from './provider-registry';
 import { runtimeModelCatalog } from './runtime-catalog';
 import { getRuntimeManagedModel, managedLineupRevision, type ManagedModel } from './managed-models';
 import { servedManagedModels } from './served-managed-models';
+import { openRouterFreeGatewayCatalog } from '../resolution/openrouter-free';
 
 // The real upstream provider id for the ChatGPT-subscription lineup served
 // under `codex/<id>` — kept as one named constant so this file, the sandbox
@@ -322,10 +323,8 @@ function refreshedCatalogs(): {
 // the Free plan) gets no Kortix-managed model at all: only its own connected
 // provider keys and ChatGPT subscription.
 export function gatewayModelCatalog(
-  projectId: string | undefined,
-  opts?: { freeManagedOnly?: boolean },
+  _projectId: string | undefined,
+  _opts?: { freeManagedOnly?: boolean },
 ): Record<string, GatewayModel> {
-  const catalogs = refreshedCatalogs();
-  if (opts?.freeManagedOnly) return projectId ? catalogs.byokAndCodex : EMPTY_CATALOG;
-  return projectId ? catalogs.full : catalogs.managed;
+  return openRouterFreeGatewayCatalog();
 }

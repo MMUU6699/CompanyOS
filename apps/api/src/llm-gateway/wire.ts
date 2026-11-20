@@ -1,8 +1,21 @@
 import { type OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
+import { createGateway, readRequestOrigin } from '@kortix/llm-gateway';
 import { config } from '../config';
 import { auth, errors, json, makeOpenApiApp } from '../openapi';
 import { createLlmGatewayRateLimitMiddleware } from '../middleware/rate-limit';
+import { admitGatewayRequest, billingVerdict } from './admit';
+import { checkBudget } from './budgets';
+import {
+  authenticatePrincipal,
+  authorizeRequest,
+  persistGatewayTrace,
+  recordGatewayUsage,
+} from './hooks';
 import { createInternalGatewayRoutes } from './internal-routes';
+import { gatewayModelCatalog } from './models/catalog-models';
+import { servableProjectCatalog } from './models/servable-catalog';
+import { resolveCandidates } from './resolution/resolve-candidates';
+import { resolveGatewayRoute } from './routing';
 import { rethrowDatabaseError } from '../shared/database-errors';
 
 // ─── OpenAPI documentation for the inference surface ────────────────────────
@@ -590,12 +603,110 @@ export function mountLlmGateway(app: OpenAPIHono): void {
     }
   }
 
-  const proxy = async (c: import('hono').Context, path: string): Promise<Response> => {
-    if (!proxyBase) {
+  const inProcessGateway = !proxyBase
+    ? createGateway({
+        authenticate: authenticatePrincipal,
+        authorize: (token) => authorizeRequest(token, { deferBilling: true }),
+        resolveRoute: resolveGatewayRoute,
+        resolveUpstream: (principal, model) => resolveCandidates(principal, model),
+        assertBillingActive: async (accountId) => {
+          const verdict = await billingVerdict(accountId);
+          if (!verdict.active) {
+            const err = new Error(verdict.message || 'Billing inactive') as Error & { reason?: string };
+            err.reason = verdict.reason;
+            throw err;
+          }
+          return verdict.holdUsd ? { holdUsd: verdict.holdUsd } : undefined;
+        },
+        assertBudget: async (principal) => {
+          const budget = await checkBudget(principal);
+          if (budget.exceeded) throw new Error(budget.message || 'Budget exceeded');
+        },
+        recordUsage: recordGatewayUsage,
+        recordTrace: (trace) =>
+          persistGatewayTrace(trace).catch(() => undefined),
+        listModels: async (principal, opts) => {
+          if (opts?.scope === 'picker' && principal.projectId) {
+            const catalog = await servableProjectCatalog({
+              projectId: principal.projectId,
+              accountId: principal.accountId,
+              principalUserId: principal.userId,
+              personalUserId: principal.personalUserId === undefined ? principal.userId : principal.personalUserId,
+            });
+            return catalog.models;
+          }
+          return gatewayModelCatalog(opts?.managedOnly ? undefined : principal.projectId, {
+            freeManagedOnly: !!principal.freeModelsOnly,
+          });
+        },
+      })
+    : null;
+
+  const handleInProcess = async (c: import('hono').Context, tail: string): Promise<Response> => {
+    if (!inProcessGateway) {
       return c.json(
         { error: 'Standalone LLM gateway is not configured', code: 'gateway_unavailable' },
         503,
       );
+    }
+    const normalized = tail.replace(/^\/v1(?=\/)/, '');
+    const method = c.req.method.toUpperCase();
+    const authHeader = c.req.header('authorization');
+    const origin = readRequestOrigin((name) => c.req.header(name));
+
+    if (method === 'GET' && normalized === '/models') {
+      const scope = c.req.query('scope');
+      const openAiList = scope !== 'managed' && scope !== 'picker' && scope !== 'all';
+      return inProcessGateway.listModels(
+        authHeader,
+        {
+          managedOnly: scope === 'managed',
+          scope: scope === 'picker' || openAiList ? 'picker' : undefined,
+        },
+        openAiList,
+      );
+    }
+
+    if (method === 'POST' && normalized === '/chat/completions') {
+      const rawBody = await c.req.text();
+      return inProcessGateway.chatCompletions({
+        authorization: authHeader,
+        rawBody,
+        signal: c.req.raw.signal,
+        origin,
+      });
+    }
+
+    if (method === 'POST' && normalized === '/messages') {
+      const rawBody = await c.req.text();
+      const msgAuth = authHeader || (c.req.header('x-api-key') ? `Bearer ${c.req.header('x-api-key')}` : undefined);
+      return inProcessGateway.messages({
+        authorization: msgAuth,
+        rawBody,
+        signal: c.req.raw.signal,
+        origin,
+      });
+    }
+
+    if (method === 'POST' && normalized === '/responses') {
+      const rawBody = await c.req.text();
+      return inProcessGateway.responses({
+        authorization: authHeader,
+        rawBody,
+        signal: c.req.raw.signal,
+        origin,
+      });
+    }
+
+    return c.json(
+      { error: `Unsupported LLM gateway endpoint: ${method} ${tail}`, code: 'not_found' },
+      404,
+    );
+  };
+
+  const proxy = async (c: import('hono').Context, path: string): Promise<Response> => {
+    if (!proxyBase) {
+      return handleInProcess(c, path);
     }
 
     const headers = new Headers(c.req.raw.headers);

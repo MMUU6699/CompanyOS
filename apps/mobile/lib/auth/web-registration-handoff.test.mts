@@ -18,11 +18,15 @@ test('isMobileAuthCallbackUrl accepts the custom scheme callback', () => {
     isMobileAuthCallbackUrl('kortix://auth/callback?state=native-state'),
     true,
   );
+  assert.equal(
+    isMobileAuthCallbackUrl('exp+kortix://auth/callback?state=native-state'),
+    true,
+  );
 });
 
 test('isMobileAuthCallbackUrl accepts only opted-in Kortix HTTPS callbacks', () => {
   assert.equal(
-    isMobileAuthCallbackUrl('https://kortix.com/auth/callback?mobile_callback=1&state=native-state'),
+    isMobileAuthCallbackUrl('https://kortix-computer-app.netlify.app/auth/callback?mobile_callback=1&state=native-state'),
     true,
   );
   assert.equal(
@@ -30,7 +34,7 @@ test('isMobileAuthCallbackUrl accepts only opted-in Kortix HTTPS callbacks', () 
     false,
   );
   assert.equal(
-    isMobileAuthCallbackUrl('https://kortix.com/auth/callback?state=native-state'),
+    isMobileAuthCallbackUrl('https://kortix-computer-app.netlify.app/auth/callback?state=native-state'),
     false,
   );
 });

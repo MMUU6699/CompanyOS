@@ -66,45 +66,9 @@ import { pickInitialTab } from './utils';
 
 export type { ProjectProviderModalProps } from './types';
 
-export function ProjectProviderModal({
-  projectId,
-  open,
-  onOpenChange,
-  defaultTab,
-  defaultProviderId,
-  canWrite = false,
-}: ProjectProviderModalProps) {
-  return (
-    <Modal open={open} onOpenChange={onOpenChange}>
-      {/* ONE height, declared once as a var and pinned from both sides.
-          `h-` alone is not enough on desktop: ModalVariants' bottom side
-          carries `lg:h-auto` (modal.tsx), which twMerge does NOT collapse
-          into the unprefixed `h-[…]` (different modifier group) — so the
-          modal silently became content-sized at `lg:` and its height jumped
-          with every tab switch (3 key rows vs 34 model rows vs the Custom
-          form). `lg:min-h` + `lg:max-h` clamp that `h-auto` to a constant.
-          The unprefixed mobile sheet keeps its own `max-h-[90%]` cap. */}
-      <ModalContent
-        // The default-model picker sits in the close button's own row, so the
-        // two share one centre line instead of the picker floating in the header.
-        // `lg:h-(…)` (not only min/max): the SplitSheet body below sizes with
-        // `h-full`, which needs a DEFINITE height — with `lg:h-auto` from the
-        // modal base it grew to its content and nothing could scroll.
-        closeButtonChildren={
-          canWrite && open ? <ProjectDefaultPicker projectId={projectId} /> : null
-        }
-        className="bg-background flex h-(--provider-modal-h) w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 [--provider-modal-h:min(680px,calc(100dvh-2rem))] lg:h-(--provider-modal-h) lg:max-h-(--provider-modal-h) lg:min-h-(--provider-modal-h) lg:max-w-4xl">
-        <ProviderModalBody
-          key={`${open}-${defaultTab ?? ''}-${defaultProviderId ?? ''}`}
-          projectId={projectId}
-          open={open}
-          canWrite={canWrite}
-          defaultTab={defaultTab}
-          defaultProviderId={defaultProviderId}
-        />
-      </ModalContent>
-    </Modal>
-  );
+export function ProjectProviderModal(_props: ProjectProviderModalProps) {
+  // LLM provider & BYOK configuration is disabled; model is locked in backend.
+  return null;
 }
 
 /**

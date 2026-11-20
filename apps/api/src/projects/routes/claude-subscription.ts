@@ -152,10 +152,7 @@ export function registerClaudeSubscriptionRoutes(): void {
       responses: { 200: json(StatusSchema, 'Login status'), ...errors(403, 404) },
     }),
     async (c) => {
-      const { workspaceId: projectId } = c.req.valid('param');
-      const who = await caller(c, projectId);
-      if ('body' in who) return c.json(who.body, who.status);
-      return c.json(await status(who), 200);
+      return c.json({ connected: false, accounts: 0 }, 200);
     },
   );
 
@@ -165,27 +162,13 @@ export function registerClaudeSubscriptionRoutes(): void {
       path: '/{workspaceId}/claude-subscription/login/start',
       tags: ['secrets'],
       summary: 'Start a Claude subscription sign-in',
-      description:
-        "Runs the unmodified Claude Code binary's `claude setup-token` and returns its claude.com sign-in link. Open the link, approve, then send the code claude.com shows to `login/complete`. The completed sign-in adds a Claude account (private to you unless `sharing` says otherwise) or reconnects `resource_id`. A new start replaces your earlier one.",
+      description: 'Disabled when LLM provider is locked.',
       ...auth,
       request: { params: Params, body: { content: { 'application/json': { schema: StartBody } } } },
       responses: { 200: json(StartSchema, 'The sign-in link'), ...errors(400, 403, 404, 429, 502, 503) },
     }),
     async (c) => {
-      const { workspaceId: projectId } = c.req.valid('param');
-      const body = c.req.valid('json');
-      const who = await caller(c, projectId);
-      if ('body' in who) return c.json(who.body, who.status);
-      const target = await accountTarget(c, who, body);
-      if ('body' in target) return c.json(target.body, target.status);
-      try {
-        const started = await startClaudeLogin({ ...who, target });
-        return c.json({ flow_id: started.flowId, authorize_url: started.authorizeUrl, expires_at: started.expiresAt }, 200);
-      } catch (err) {
-        if (!(err instanceof ClaudeLoginFlowError)) throw err;
-        const status = err.status === 429 || err.status === 503 ? err.status : 502;
-        return c.json({ error: err.code, message: err.message, code: err.code }, status);
-      }
+      return c.json({ error: 'model_selection_locked', message: 'External LLM provider login is disabled on this deployment.', code: 'model_selection_locked' }, 403);
     },
   );
 
@@ -195,34 +178,13 @@ export function registerClaudeSubscriptionRoutes(): void {
       path: '/{workspaceId}/claude-subscription/login/complete',
       tags: ['secrets'],
       summary: 'Finish a Claude subscription sign-in',
-      description:
-        'Hands the code claude.com showed to the running `claude setup-token`, which exchanges it with Anthropic. On success the Claude account the start named is stored. Errors: `invalid_code`, `expired`, `login_failed`.',
+      description: 'Disabled when LLM provider is locked.',
       ...auth,
       request: { params: Params, body: { content: { 'application/json': { schema: CompleteBody } } } },
       responses: { 200: json(ConnectedSchema, 'Signed in'), ...errors(400, 403, 404, 409, 410, 502) },
     }),
     async (c) => {
-      const { workspaceId: projectId } = c.req.valid('param');
-      const body = c.req.valid('json');
-      const who = await caller(c, projectId);
-      if ('body' in who) return c.json(who.body, who.status);
-      let secretId: string | null;
-      try {
-        ({ secretId } = await completeClaudeLogin({ accountId: who.accountId, userId: who.userId, flowId: body.flow_id, code: body.code }));
-      } catch (err) {
-        if (!(err instanceof ClaudeLoginFlowError)) throw err;
-        const status = err.status === 400 || err.status === 404 || err.status === 409 || err.status === 410 ? err.status : 502;
-        return c.json({ error: err.code, message: err.message, code: err.code }, status);
-      }
-      if (!secretId) return c.json({ error: 'login_failed', message: 'This sign-in started before Claude accounts. Start it again.', code: 'login_failed' }, 410);
-      // `caller` admits only a person who is a member of the account.
-      captureProductEvent({
-        userId: who.userId,
-        accountId: who.accountId,
-        event: 'provider_configured',
-        properties: { project_id: projectId, provider: 'claude', method: 'subscription', source: analyticsSource(c) },
-      });
-      return c.json({ connected: true as const, secret_id: secretId }, 200);
+      return c.json({ error: 'model_selection_locked', message: 'External LLM provider login is disabled on this deployment.', code: 'model_selection_locked' }, 403);
     },
   );
 
@@ -232,36 +194,13 @@ export function registerClaudeSubscriptionRoutes(): void {
       path: '/{workspaceId}/claude-subscription/token',
       tags: ['secrets'],
       summary: 'Store a Claude subscription token you made',
-      description:
-        'Stores the token `claude setup-token` printed on your own computer as a Claude account (private to you unless `sharing` says otherwise), or as the new login of your account `resource_id`. Only the LLM gateway reads it. It is never returned.',
+      description: 'Disabled when LLM provider is locked.',
       ...auth,
       request: { params: Params, body: { content: { 'application/json': { schema: TokenBody } } } },
       responses: { 200: json(ConnectedSchema, 'Stored'), ...errors(400, 403, 404) },
     }),
     async (c) => {
-      const { workspaceId: projectId } = c.req.valid('param');
-      const body = c.req.valid('json');
-      const token = body.token.trim();
-      const who = await caller(c, projectId);
-      if ('body' in who) return c.json(who.body, who.status);
-      if (!CLAUDE_TOKEN_PATTERN.test(token)) {
-        return c.json(
-          { error: 'invalid_token', message: 'Paste the whole token `claude setup-token` printed. It starts with sk-ant-oat01-.', code: 'invalid_token' },
-          400,
-        );
-      }
-      const target = await accountTarget(c, who, body);
-      if ('body' in target) return c.json(target.body, target.status);
-      const secretId = await storeClaudeAccount({ ...who, target, token });
-      if (!secretId) return c.json({ error: 'not_found', message: 'This Claude account is no longer available. Add it again.', code: 'not_found' }, 404);
-      // `caller` admits only a person who is a member of the account.
-      captureProductEvent({
-        userId: who.userId,
-        accountId: who.accountId,
-        event: 'provider_configured',
-        properties: { project_id: projectId, provider: 'claude', method: 'subscription', source: analyticsSource(c) },
-      });
-      return c.json({ connected: true as const, secret_id: secretId }, 200);
+      return c.json({ error: 'model_selection_locked', message: 'External LLM provider tokens are disabled on this deployment.', code: 'model_selection_locked' }, 403);
     },
   );
 
@@ -271,18 +210,13 @@ export function registerClaudeSubscriptionRoutes(): void {
       path: '/{workspaceId}/claude-subscription',
       tags: ['secrets'],
       summary: 'Delete your own Claude accounts in this project',
-      description: 'Deletes every Claude account you added to this project and stops your running Claude sign-ins. Accounts others shared with you stay.',
+      description: 'Disabled when LLM provider is locked.',
       ...auth,
       request: { params: Params },
       responses: { 200: json(StatusSchema, 'Disconnected'), ...errors(403, 404) },
     }),
     async (c) => {
-      const { workspaceId: projectId } = c.req.valid('param');
-      const who = await caller(c, projectId);
-      if ('body' in who) return c.json(who.body, who.status);
-      await cancelClaudeLogins(who.accountId, who.userId);
-      await deleteOwnClaudeAccounts(who.accountId, who.projectId, who.userId);
-      return c.json(await status(who), 200);
+      return c.json({ error: 'model_selection_locked', message: 'External LLM provider accounts are disabled on this deployment.', code: 'model_selection_locked' }, 403);
     },
   );
 }

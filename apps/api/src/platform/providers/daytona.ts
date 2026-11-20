@@ -9,12 +9,17 @@ import type { SandboxExecOptions, SandboxExecResult } from './contract';
 import { isProviderNotFound } from './status';
 import { SandboxState } from '@daytonaio/sdk';
 import { SANDBOX_VERSION, config } from '../../config';
+import { evictIdleRunningDaytonaSandboxes } from '../../projects/compute-quota-guard';
 import { triggerEmergencyDiskArchiveSweep } from '../../projects/disk-quota-guard';
 import {
   archiveDaytonaSandboxById,
   getDaytona,
+  getDaytonaSandboxStateById,
+  isDaytonaComputeQuotaError,
   isDaytonaDiskQuotaError,
+  listStartedDaytonaSandboxesOldestFirst,
   listStoppedDaytonaSandboxesOldestFirst,
+  stopDaytonaSandboxById,
 } from '../../shared/daytona';
 import { configuredTimeoutMs, withTimeout } from '../../shared/with-timeout';
 import { serviceKeyForExternalId } from '../service-key';
@@ -66,6 +71,12 @@ const diskQuotaGuardDeps = {
   archive: archiveDaytonaSandboxById,
 };
 
+const computeQuotaGuardDeps = {
+  listStarted: listStartedDaytonaSandboxesOldestFirst,
+  stop: stopDaytonaSandboxById,
+  getState: getDaytonaSandboxStateById,
+};
+
 /**
  * Any Daytona create/resume call can hit the org-wide disk quota. Firing the
  * emergency archive sweep here (rather than in every call site) means every
@@ -74,6 +85,10 @@ const diskQuotaGuardDeps = {
  * Always rethrows — this never rescues the request that hit the error.
  */
 function reportIfDiskQuotaError(err: unknown, reason: string): never {
+  console.error(
+    `[DAYTONA] ${reason} failed:`,
+    err instanceof Error ? err.message : String(err),
+  );
   if (isDaytonaDiskQuotaError(err)) {
     triggerEmergencyDiskArchiveSweep(reason, diskQuotaGuardDeps);
   }
@@ -216,24 +231,42 @@ export class DaytonaProvider implements SandboxProvider {
     }
 
     const daytona = getDaytona();
-    const daytonaSandbox = await daytona
-      .create(
-        {
-          snapshot,
-          envVars,
-          // Idle → stop → archive → delete. See daytonaLifecycle(): auto-stop is
-          // clamped to >= 1 so a normal session box can never be created persistent,
-          // a large auto-archive (default 3 days) keeps a hibernated box in the
-          // fast-resume "stopped" tier, and a finite auto-delete reclaims it if the
-          // API/tunnel that created it dies. Intervals are env-tunable
-          // (KORTIX_SANDBOX_AUTO*).
-          ...daytonaLifecycle(opts.autoStopInterval),
-          labels: await managedSandboxLabels(workloadType),
-          public: false,
-        },
-        { timeout: createTimeoutSeconds },
-      )
-      .catch((err) => reportIfDiskQuotaError(err, 'create'));
+    const labels = await managedSandboxLabels(workloadType);
+    const createParams = {
+      snapshot,
+      envVars,
+      // Idle → stop → archive → delete. See daytonaLifecycle(): auto-stop is
+      // clamped to >= 1 so a normal session box can never be created persistent,
+      // a large auto-archive (default 3 days) keeps a hibernated box in the
+      // fast-resume "stopped" tier, and a finite auto-delete reclaims it if the
+      // API/tunnel that created it dies. Intervals are env-tunable
+      // (KORTIX_SANDBOX_AUTO*).
+      ...daytonaLifecycle(opts.autoStopInterval),
+      labels,
+      public: false,
+    };
+
+    const runCreate = () =>
+      daytona.create(createParams, { timeout: createTimeoutSeconds });
+
+    let daytonaSandbox;
+    try {
+      daytonaSandbox = await runCreate();
+    } catch (err) {
+      if (isDaytonaComputeQuotaError(err)) {
+        const eviction = await evictIdleRunningDaytonaSandboxes('create', computeQuotaGuardDeps);
+        if (eviction.evictedIds.length > 0) {
+          for (const evictedId of eviction.evictedIds) runningStatusCache.delete(evictedId);
+          daytonaSandbox = await runCreate().catch((retryErr) =>
+            reportIfDiskQuotaError(retryErr, 'create-after-evict'),
+          );
+        } else {
+          reportIfDiskQuotaError(err, 'create');
+        }
+      } else {
+        reportIfDiskQuotaError(err, 'create');
+      }
+    }
 
     const externalId = daytonaSandbox.id;
     const apiBase = sandboxApiBase;
@@ -332,11 +365,31 @@ export class DaytonaProvider implements SandboxProvider {
       PROVIDER_CALL_TIMEOUT_MS,
       `Daytona get(${externalId})`,
     );
-    await withTimeout(
-      sandbox.start(),
-      PROVIDER_CALL_TIMEOUT_MS,
-      `Daytona start(${externalId})`,
-    ).catch((err) => reportIfDiskQuotaError(err, 'resume'));
+    const runStart = () =>
+      withTimeout(
+        sandbox.start(),
+        PROVIDER_CALL_TIMEOUT_MS,
+        `Daytona start(${externalId})`,
+      );
+    try {
+      await runStart();
+    } catch (err) {
+      if (isDaytonaComputeQuotaError(err)) {
+        const eviction = await evictIdleRunningDaytonaSandboxes(
+          `resume:${externalId}`,
+          computeQuotaGuardDeps,
+          externalId,
+        );
+        if (eviction.evictedIds.length > 0) {
+          for (const evictedId of eviction.evictedIds) runningStatusCache.delete(evictedId);
+          await runStart().catch((retryErr) =>
+            reportIfDiskQuotaError(retryErr, `resume-after-evict:${externalId}`),
+          );
+          return;
+        }
+      }
+      reportIfDiskQuotaError(err, `resume:${externalId}`);
+    }
   }
 
   async renewLifecycle(externalId: string): Promise<void> {

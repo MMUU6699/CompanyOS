@@ -280,6 +280,7 @@ const ALLOWED_PROXY_ORIGINS =
         '*.localhost:8008',
         // Daytona cloud sandbox proxy
         '*.daytonaproxy01.net',
+        '*.daytonaproxy01.eu',
         // Cloudflare quick tunnel (KORTIX_URL in scripts/dev-local.sh)
         '*.trycloudflare.com',
         ...EXTRA_ALLOWED_ORIGINS,
@@ -478,6 +479,9 @@ const nextConfig = (): NextConfig => ({
     // build cache off; 16 GB CI runners keep it (and its warm 36.3 s -> 1.9 s
     // compile). KORTIX_TURBOPACK_BUILD_CACHE=on|off overrides.
     turbopackFileSystemCacheForBuild: resolveTurbopackFileSystemCacheForBuild(),
+    ...(process.env.KORTIX_BUILD_CPUS
+      ? { cpus: Number(process.env.KORTIX_BUILD_CPUS), workerThreads: false }
+      : {}),
     // Without GC (the default, and the only mode before 16.4) the persistent
     // cache keeps every task it ever computed. Each `git merge origin/dev`
     // adds a new set, so a busy worktree's .next/dev/cache/turbopack reached

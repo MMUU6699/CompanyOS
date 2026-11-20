@@ -1,4 +1,5 @@
 import { type AuthedPrincipal, GatewayResolutionError } from '@kortix/llm-gateway';
+import { isInOpenRouterFreeChain, primaryOpenRouterFreeModelId } from './openrouter-free';
 import { connectedByokPickerModels } from '../models/picker-catalog';
 import { DEFAULT_AGENT_SENTINEL } from '../../projects/agents';
 import {
@@ -178,6 +179,41 @@ async function ownModelDefault(
 }
 
 export async function resolveDefaultModelForPrincipal(
+  _principal: AuthedPrincipal,
+): Promise<string | undefined> {
+  return primaryOpenRouterFreeModelId();
+}
+
+export async function isModelServableForAccount(params: {
+  userId: string;
+  accountId: string;
+  projectId: string;
+  freeModelsOnly: boolean;
+  model: string;
+  sessionId?: string;
+  providerSecretPools?: Record<string, string[]>;
+  personalUserId?: string | null;
+  restingIsServable?: boolean;
+}): Promise<boolean> {
+  return isInOpenRouterFreeChain(toWireModel(params.model));
+}
+
+export async function resolveEffectiveModel(_params: {
+  userId: string;
+  accountId: string;
+  projectId: string;
+  agentName?: string | null;
+  explicit?: string | null;
+  freeModelsOnly: boolean;
+  sessionId?: string;
+  providerSecretPools?: Record<string, string[]>;
+  personalUserId?: string | null;
+}): Promise<{ model: string | null; source: ModelSource }> {
+  return { model: primaryOpenRouterFreeModelId(), source: 'platform' };
+}
+
+// Legacy multi-provider default resolution retained below (unreachable while NVIDIA Gemma 4 31B lock is active).
+async function _legacyResolveDefaultModelForPrincipal(
   principal: AuthedPrincipal,
 ): Promise<string | undefined> {
   const defaults = await cachedAccountDefaults(principal.accountId, principal.projectId);
@@ -247,7 +283,7 @@ export async function resolveDefaultModelForPrincipal(
  * key isn't connected; only an actual generation attempt should. Anything
  * that ISN'T a GatewayResolutionError (a real bug) still propagates.
  */
-export async function isModelServableForAccount(params: {
+async function _legacyIsModelServableForAccount(params: {
   userId: string;
   accountId: string;
   projectId: string;
@@ -321,7 +357,7 @@ export async function isModelServableForAccount(params: {
  * `model` is a concrete gateway wire id, or null when only the platform default
  * applies (the caller omits it and the gateway resolves `auto`).
  */
-export async function resolveEffectiveModel(params: {
+async function _legacyResolveEffectiveModel(params: {
   userId: string;
   accountId: string;
   projectId: string;

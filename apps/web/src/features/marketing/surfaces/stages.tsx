@@ -63,7 +63,7 @@ function CliStage() {
       <TerminalFrame
         title="~/arcadia"
         lines={[
-          { kind: 'cmd', text: 'curl -fsSL https://kortix.com/install | bash' },
+          { kind: 'cmd', text: 'curl -fsSL https://kortix-computer-app.netlify.app/install | bash' },
           { kind: 'cmd', text: 'kortix login' },
           { kind: 'note', text: 'your browser opens; approve the sign-in there' },
           { kind: 'gap' },

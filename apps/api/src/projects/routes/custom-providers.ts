@@ -65,15 +65,7 @@ export function registerCustomProvidersRoutes(): void {
     const { workspaceId: projectId } = c.req.valid('param');
     const loaded = await loadProjectForUser(c, projectId, 'read');
     if (!loaded) return c.json({ error: 'Not found' }, 404);
-    const { providers, secretNames } = await listProjectCustomProviders(projectId);
-    const configured = new Set(providers.map((provider) => customProviderSecretName(provider.id)));
-    // A key saved by the old Custom form (an opencode.jsonc snippet) has no
-    // endpoint in Kortix yet: listed so the owner can add one.
-    const legacy = secretNames.filter((name) => !configured.has(name)).flatMap((name) => {
-      const id = customProviderIdFromSecret(name);
-      return id ? [{ id, name: id, base_url: null, models: [], secret_name: name, has_key: true, configured: false }] : [];
-    });
-    return c.json({ providers: [...providers.map((provider) => view(provider, secretNames)), ...legacy] });
+    return c.json({ providers: [] });
   });
 
   projectsApp.openapi(createRoute({
@@ -82,46 +74,7 @@ export function registerCustomProvidersRoutes(): void {
     request: { params: Params, body: { content: { 'application/json': { schema: CustomLlmProviderInputSchema } } } },
     responses: { 200: json(CustomLlmProviderSchema, 'The saved provider'), ...errors(400, 403, 404) },
   }), async (c) => {
-    const { workspaceId: projectId, providerId } = c.req.valid('param');
-    const input = c.req.valid('json');
-    const loaded = await loadProjectForUser(c, projectId, 'read');
-    if (!loaded) return c.json({ error: 'Not found' }, 404);
-    await assertProjectCapability(c, loaded.userId, loaded.row.accountId, projectId, PROJECT_ACTIONS.PROJECT_MODEL_WRITE);
-    const idError = customProviderIdError(providerId);
-    if (idError === 'reserved_provider_id') {
-      return c.json({ error: `"${providerId}" is a built-in provider. Connect it under Providers instead.`, code: idError }, 400);
-    }
-    if (idError) {
-      return c.json({ error: 'Provider ID can use lowercase letters, numbers, dashes and underscores (64 at most)', code: idError }, 400);
-    }
-    // The gateway enforces this on every request; checking here turns a dead
-    // endpoint into a clear error at save time.
-    try {
-      await assertSafeEgressUrl(input.base_url, {
-        allowHttp: true,
-        allowPrivateHosts: config.KORTIX_LLM_CUSTOM_PROVIDER_ALLOW_HOSTS,
-      });
-    } catch (error) {
-      if (!(error instanceof UnsafeEgressError)) throw error;
-      return c.json({
-        error: 'The base URL must be a public address the Kortix gateway can reach.',
-        code: 'unsafe_base_url',
-      }, 400);
-    }
-    // Save the key first: the endpoint's `GET /models` usually needs it.
-    const key = await firstGatewayKeyValue({
-      accountId: loaded.row.accountId, projectId, userId: loaded.userId, grantUserId: loaded.userId,
-      providerId, name: customProviderSecretName(providerId),
-    });
-    const detected = await probeCustomModels(input.base_url, key);
-    const next = await writeProjectCustomProvider(projectId, providerId, input, detected);
-    // A key saved before its endpoint existed is a legacy secret (no provider
-    // to file it under yet): now that the provider exists it moves to the named store.
-    await moveLegacyProviderKeysNamed(projectId, customProviderSecretName(providerId));
-    const { secretNames } = await listProjectCustomProviders(projectId);
-    // Running sessions re-read the served model list.
-    void propagateProjectSecretsToActiveSandboxes(projectId, { refreshModels: true });
-    return c.json(view(next!.find((provider) => provider.id === providerId)!, secretNames));
+    return c.json({ error: 'Custom LLM providers are disabled on this deployment.', code: 'model_selection_locked' }, 403);
   });
 
   projectsApp.openapi(createRoute({
@@ -130,12 +83,6 @@ export function registerCustomProvidersRoutes(): void {
     request: { params: Params },
     responses: { 204: { description: 'Removed' }, ...errors(403, 404) },
   }), async (c) => {
-    const { workspaceId: projectId, providerId } = c.req.valid('param');
-    const loaded = await loadProjectForUser(c, projectId, 'read');
-    if (!loaded) return c.json({ error: 'Not found' }, 404);
-    await assertProjectCapability(c, loaded.userId, loaded.row.accountId, projectId, PROJECT_ACTIONS.PROJECT_MODEL_WRITE);
-    if (!(await writeProjectCustomProvider(projectId, providerId, null))) return c.json({ error: 'Not found' }, 404);
-    void propagateProjectSecretsToActiveSandboxes(projectId, { refreshModels: true });
-    return c.body(null, 204);
+    return c.json({ error: 'Custom LLM providers are disabled on this deployment.', code: 'model_selection_locked' }, 403);
   });
 }

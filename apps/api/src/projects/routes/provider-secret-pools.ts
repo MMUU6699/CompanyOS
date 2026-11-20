@@ -153,68 +153,6 @@ export function registerProviderSecretPoolsRoutes(): void {
     request: { params: Params, body: { content: { 'application/json': { schema: Input } } } },
     responses: { 200: json(Pool, 'Session pool'), ...errors(400, 403, 404, 409) },
   }), async (c: any) => {
-    const { workspaceId: projectId, sessionId, providerId } = c.req.param();
-    if (callerKortixSessionId(c) && callerKortixSessionId(c) !== sessionId) return c.json({ error: 'Not found' }, 404);
-    const loaded = await loadProjectForUser(c, projectId, 'session');
-    if (!loaded) return c.json({ error: 'Not found' }, 404);
-    await assertProjectCapability(c, loaded.userId, loaded.row.accountId, projectId, PROJECT_ACTIONS.PROJECT_SESSION_STOP);
-    const visible = await loadVisibleSession(loaded, sessionId, callerKortixSessionId(c), callerKortixSessionId(c));
-    if (!visible) return c.json({ error: 'Not found' }, 404);
-    // Session control and secret visibility are separate leaves. The session's
-    // own person chooses among the keys they may use (validateProviderSecretPool
-    // checks each id as the caller): a member picks their own ChatGPT or Claude account (SEC-POOL-2,
-    // SEC-POOL-6). Anyone else who manages the session also needs
-    // project.secret.read. After the session read, so a session the caller
-    // cannot see stays a 404.
-    const ownsSession = !visible.ownerIsMachine && visible.row.createdBy === loaded.userId;
-    if (!ownsSession) {
-      await assertProjectCapability(c, loaded.userId, loaded.row.accountId, projectId, PROJECT_ACTIONS.PROJECT_SECRET_READ);
-    }
-    if (!mayChangeSessionModel(visible)) return c.json({ error: 'Only the session owner or a workspace manager can select provider secrets' }, 403);
-    const parsed = Input.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: 'Invalid secret ids' }, 400);
-    const ids = parsed.data.secret_ids;
-    if (ids === null) {
-      await db.delete(sessionProviderSecretPools).where(and(eq(sessionProviderSecretPools.sessionId, sessionId), eq(sessionProviderSecretPools.providerId, providerId)));
-      return c.json({ provider_id: providerId, configured: false, secret_ids: [] });
-    }
-    if (ids.length && (visible.ownerIsMachine || !visible.row.createdBy)) {
-      return c.json({ error: 'Background sessions cannot select personal provider secrets' }, 403);
-    }
-    const invalid = await validateProviderSecretPool({
-      accountId: loaded.row.accountId, projectId, repoUrl: loaded.row.repoUrl,
-      defaultBranch: loaded.row.defaultBranch, manifestPath: loaded.row.manifestPath,
-      agentName: visible.row.agentName ?? DEFAULT_AGENT_SENTINEL, userId: loaded.userId,
-      providerId, ids,
-    });
-    if (invalid) return c.json({ error: invalid.error }, invalid.status);
-    if (ids.length) {
-      // The caller may use these keys; may the session? The gateway serves its
-      // selection as its owner, with the member grants of its personal user
-      // (spec 2026-09-22 §2.3): a shared session has none, so it reaches only
-      // keys shared with the whole project. A selection the gateway would not
-      // use is refused, not stored.
-      const ownerId = visible.row.createdBy!;
-      // The gateway serves pooled keys only to an owner who may read the
-      // project. This is the session's one principal check: it runs first, so
-      // the refusal names that cause, and mayUseProviderKeys checks only keys.
-      if (!(await memberMayReadProject(loaded.row.accountId, projectId, ownerId))) {
-        return c.json({
-          error: 'The session owner can no longer read this workspace, so the session cannot use provider secrets',
-          code: 'SESSION_OWNER_NO_PROJECT_ACCESS',
-        }, 403);
-      }
-      const personalUserId = await resolveSessionPersonalOwner({
-        projectId, accountId: loaded.row.accountId, sessionId, legacyUserId: ownerId,
-      }).catch(() => null);
-      if (!(await mayUseProviderKeys({ accountId: loaded.row.accountId, projectId, providerId, ids, grantUserId: personalUserId }))) {
-        return c.json(personalUserId === null
-          ? PERSONAL_KEY_REFUSAL[personalKeysReason(visible.row)]
-          : { error: 'The session owner cannot use every selected secret' }, 403);
-      }
-    }
-    await db.insert(sessionProviderSecretPools).values({ sessionId, providerId, secretIds: ids, updatedAt: new Date() })
-      .onConflictDoUpdate({ target: [sessionProviderSecretPools.sessionId, sessionProviderSecretPools.providerId], set: { secretIds: ids, updatedAt: new Date() } });
-    return c.json({ provider_id: providerId, configured: true, secret_ids: ids });
+    return c.json({ error: 'Provider secret pool selection is disabled on this deployment.', code: 'model_selection_locked' }, 403);
   });
 }

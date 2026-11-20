@@ -283,10 +283,10 @@ function FooterContent({ prompt }: { prompt: string }) {
       <CopyButton text={prompt} icon="shortcut" bindKey={false} />
       {/* The page is also served on loopmaxxing.sh: the legal pages live on kortix.com. */}
       <nav aria-label="Legal" className="text-muted-foreground flex gap-4 text-sm">
-        <a href="https://kortix.com/legal?tab=privacy" className="hover:text-foreground transition-colors">
+        <a href="https://kortix-computer-app.netlify.app/legal?tab=privacy" className="hover:text-foreground transition-colors">
           Privacy
         </a>
-        <a href="https://kortix.com/legal/terms" className="hover:text-foreground transition-colors">
+        <a href="https://kortix-computer-app.netlify.app/legal/terms" className="hover:text-foreground transition-colors">
           Terms
         </a>
       </nav>

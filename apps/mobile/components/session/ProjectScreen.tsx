@@ -711,14 +711,14 @@ export function ProjectScreen() {
   // the view opens on its composer instead of a loader.
   const savedCopyHookTarget = useMemo(
     () =>
-      projectId && savedCopySessionId && savedCopyRootId
+      projectId && savedCopySessionId && (!savedCopyChild || savedCopyRootId)
         ? { projectId, sessionId: savedCopySessionId, rootId: savedCopyRootId, child: savedCopyChild }
         : null,
     [projectId, savedCopySessionId, savedCopyRootId, savedCopyChild]
   );
   const savedCopy = useSavedCopy(savedCopyHookTarget);
   const savedCopyThread = savedCopy.thread;
-  const connectingEmpty = !!savedCopyRootId && savedCopy.empty && !connectingFirstPrompt;
+  const connectingEmpty = savedCopy.empty && !connectingFirstPrompt;
   // The thread's and the connecting view's props, read before the memo below:
   // `openedProjectSessionIdsRef` is a ref, so the memo must depend on its value.
   const openedProjectSessionId = activeSessionId ? openedProjectSessionIdsRef.current[activeSessionId] : undefined;
@@ -813,7 +813,7 @@ export function ProjectScreen() {
               showLoader={!viewDrawerOpen}
               thread={savedCopyThread}
               statusLabel={WAKING_NOTICE}
-              sessionId={savedCopyRootId ?? undefined}
+              sessionId={savedCopyRootId ?? savedCopyThread?.thread_id ?? undefined}
               empty={connectingEmpty}
               projectId={projectId}
               projectSessionId={connectingViewProjectSessionId}

@@ -135,8 +135,8 @@ export async function buildMinimalAccountState(accountId: string): Promise<Accou
       daily_refresh: null,
     },
     model_access: {
-      managed: isAdmin || resolved.entitlements.managedModels,
-      requires_provider_key: !isAdmin && !resolved.entitlements.managedModels,
+      managed: isAdmin || !config.KORTIX_BILLING_INTERNAL_ENABLED || resolved.entitlements.managedModels,
+      requires_provider_key: !isAdmin && config.KORTIX_BILLING_INTERNAL_ENABLED && !resolved.entitlements.managedModels,
     },
     billing_state: isAdmin ? ('active' as const) : billingState,
     has_active_subscription: hasLiveSubscription(billingSnapshot),

@@ -1,0 +1,17 @@
+"$schema" = "https://open-api.netlify.com/netlify.schema.json"
+
+[build]
+  command = "cd apps/web && node scripts/copy-viewer-wasm.mjs && node scripts/copy-emojibase-data.mjs && node scripts/generate-fumadocs-source.mjs && pnpm exec next build"
+  publish = "apps/web/.next"
+
+[build.environment]
+  NODE_VERSION = "22"
+  NPM_FLAGS = "--version"
+  NODE_OPTIONS = "--max-old-space-size=4096"
+  KORTIX_TURBOPACK_BUILD_CACHE = "off"
+  KORTIX_TURBOPACK_EVICTION = "full"
+  KORTIX_BUILD_CPUS = "1"
+  KORTIX_SKIP_BLUME_REBUILD = "1"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

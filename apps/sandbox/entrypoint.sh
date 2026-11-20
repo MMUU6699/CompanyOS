@@ -75,7 +75,7 @@ desktop() {
         # `6901-<id>.daytonaproxy01.net`); the proxy sends no Origin here.
         voxl --port="${DESKTOP_PORT}" --enable-resize=true --files-root="${HOME}" \
           --enable-basic-auth=false \
-          --allowed-hosts="${KORTIX_DESKTOP_ALLOWED_HOSTS:-.aec.local,.daytonaproxy01.net}" || true
+          --allowed-hosts="${KORTIX_DESKTOP_ALLOWED_HOSTS:-.aec.local,.daytonaproxy01.net,.daytonaproxy01.eu}" || true
         sleep 1
       done
       ;;

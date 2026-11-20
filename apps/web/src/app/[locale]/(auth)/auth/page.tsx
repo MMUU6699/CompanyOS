@@ -313,7 +313,7 @@ function AuthCardForm({
   }, []);
 
   const enabledProviders = useMemo(() => {
-    const raw = getEnv().AUTH_PROVIDERS || '';
+    const raw = getEnv().AUTH_PROVIDERS || 'google';
     return raw
       .split(',')
       .map((s) => s.trim().toLowerCase())

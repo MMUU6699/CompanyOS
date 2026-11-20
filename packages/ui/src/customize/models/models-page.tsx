@@ -32,24 +32,11 @@ import type { ReactNode } from 'react';
  * `useStandaloneCapabilityNav` is that provider's value for a page that is
  * not the overlay or `/config`.
  */
-export function ModelsPage({
-  projectId,
-  surface,
-  agentSettings,
-}: {
+export function ModelsPage(_props: {
   projectId: string;
-  /** `agent` renders the same page on one agent's editor (`agent-page.tsx`),
-   *  with `agentSettings` as its leading "This agent" tab. */
   surface?: ResourceScope;
   agentSettings?: ReactNode;
 }) {
-  const settingsNav = useStandaloneCapabilityNav(projectId, 'models');
-
-  return (
-    <SettingsNavProvider value={settingsNav}>
-      <LlmManagementView projectId={projectId} surface={surface} agentSettings={agentSettings} />
-      {/* Mobile's "connect a model provider" hand-off; nothing without ?return_to. */}
-      <AppReturnBar projectId={projectId} />
-    </SettingsNavProvider>
-  );
+  // LLM provider & model selection is locked exclusively in backend code.
+  return null;
 }

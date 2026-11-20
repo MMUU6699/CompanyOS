@@ -515,8 +515,8 @@
   "billing": {
     "loadingPaywall": "加载套餐中...",
     "checkoutUnavailable": "移动端结账不可用",
-    "checkoutUnavailableMessage": "要订阅套餐，请在网页上访问 kortix.com。",
-    "goToWeb": "前往 kortix.com",
+    "checkoutUnavailableMessage": "要订阅套餐，请访问 Kortix 网页应用。",
+    "goToWeb": "打开 Kortix 网页应用",
     "billingStatus": "账单状态",
     "loading": "加载账单信息中...",
     "error": "加载账单信息失败",
@@ -544,8 +544,8 @@
     "choosePackageBoost": "选择一个包来提升你的积分余额",
     "title": "账单",
     "cancelsOn": "取消日期",
-    "manageOnWeb": "在 kortix.com 管理",
-    "openWebFailed": "无法打开 kortix.com，请重试。"
+    "manageOnWeb": "在网页应用中管理",
+    "openWebFailed": "无法打开网页应用，请重试。"
   },
   "theme": {
     "title": "外观",
@@ -567,12 +567,12 @@
   "beta": {
     "title": "测试功能",
     "webSupportTitle": "网页版完全支持",
-    "webSupportDescription": "可在 Kortix.com 使用。即将登陆移动端—移动端仍在开发中。",
-    "visitKortix": "访问 Kortix.com",
+    "webSupportDescription": "可在 Kortix 网页应用使用。即将登陆移动端—移动端仍在开发中。",
+    "visitKortix": "打开 Kortix 网页应用",
     "advancedFeatures": "高级功能",
     "mobileBeta": "移动端测试版",
     "pleaseNote": "注意事项",
-    "mobileWarning": "移动端仍在开发中，可能存在问题。为了获得最佳体验，请使用 Kortix.com。"
+    "mobileWarning": "移动端仍在开发中，可能存在问题。为了获得最佳体验，请使用 Kortix 网页应用。"
   },
   "accountDeletion": {
     "title": "删除账户",
@@ -1299,7 +1299,7 @@
     "createTitle": "创建工作区",
     "createBody": "工作区是你的公司使用 Kortix 工作的地方：成员、智能体以及他们创建的一切。",
     "createOnWebTitle": "在网页上创建工作区",
-    "createOnWebLine": "工作区在 kortix.com 上创建。",
+    "createOnWebLine": "工作区在 Kortix 网页应用中创建。",
     "invitedHint": "收到邀请了吗？打开邮件中的邀请链接，或请管理员邀请 {{email}}。",
     "yours": "你的工作区",
     "openNamed": "打开 {{workspace}}",
@@ -1331,7 +1331,7 @@
     "name": "工作区名称",
     "billing": "账单",
     "billingAndMembers": "账单和成员",
-    "onWeb": "在 kortix.com 上",
+    "onWeb": "在网页应用中",
     "members": "成员",
     "git": "Git",
     "auditLog": "审计日志",

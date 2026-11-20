@@ -10,4 +10,6 @@
 import { resolveEndpoints } from '@/lib/deployment/deployment';
 import { activeDeployment } from '@/lib/deployment/store';
 
-export const KORTIX_WEB_URL = resolveEndpoints(activeDeployment, {}).webUrl;
+export const KORTIX_WEB_URL = resolveEndpoints(activeDeployment, {
+  EXPO_PUBLIC_WEB_URL: process.env.EXPO_PUBLIC_WEB_URL,
+}).webUrl;

@@ -14,6 +14,7 @@ import {
   injectApiKey,
 } from './helpers';
 import { boundFirecrawlRequest } from './firecrawl-budget';
+import { handleOpenWebFallback } from './open-web-fallback';
 
 // === Core Proxy Handler ===
 //
@@ -84,7 +85,7 @@ export async function handleProxy(c: any, service: ProxyServiceConfig, prefix: s
     // When billing is enabled, reject: only kortix_ tokens with billing are accepted.
     if (config.KORTIX_BILLING_INTERNAL_ENABLED) {
       throw new HTTPException(401, {
-        message: 'Kortix API key required. Get one at https://kortix.com',
+        message: 'Kortix API key required. Get one at https://kortix-computer-app.netlify.app',
       });
     }
     // Self-hosted: allow passthrough for BYOC users with their own API keys.
@@ -250,6 +251,9 @@ async function handleKortixProxy(
 
   const kortixKey = service.getKortixApiKey();
   if (!kortixKey) {
+    const body = await getRequestBody(c, method);
+    const fallback = await handleOpenWebFallback(service.name, method, subPath, body);
+    if (fallback) return fallback;
     throw new HTTPException(503, {
       message: `${service.name} not configured`,
     });

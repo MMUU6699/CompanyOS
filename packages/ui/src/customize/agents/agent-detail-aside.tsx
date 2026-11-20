@@ -45,7 +45,12 @@ type Agent = ProjectConfigSummary['agents'][number];
  * project → account → platform default. Manager-gated; everyone else sees the
  * read-only resolved model.
  */
-export function AgentModel({ projectId, agentName }: { projectId: string; agentName: string }) {
+export function AgentModel(_props: { projectId: string; agentName: string }) {
+  // Model selection is locked exclusively in backend code (NVIDIA Gemma 4 31B).
+  return null;
+}
+
+function _LegacyAgentModel({ projectId, agentName }: { projectId: string; agentName: string }) {
   const tI18nComplete = useI18nTranslations('hardcodedUi.i18nComplete');
   // Pinning an agent's model writes the gateway model defaults, so it is
   // project.model.write — what the route asserts, not "is this a manager".

@@ -539,45 +539,6 @@ export const menuRegistry: MenuItemDef[] = [
     keywords: 'feature flags flag experimental labs beta toggle enable disable',
   },
   {
-    id: 'proj-models',
-    label: 'Models',
-    icon: Cpu,
-    group: 'navigation',
-    showIn: ['commandPalette'],
-    kind: 'navigate',
-    href: '/workspaces/{projectId}/admin/models',
-    requiresProject: true,
-    // The reported bug's row. `llm gateway providers budgets anthropic openai
-    // openrouter` came off `proj-customize`'s bag, where they pointed at
-    // `/config`. 'catalog' is deliberately NOT here: it contains "log", and
-    // `command-palette-search.test.ts` pins that an audit-log search does not
-    // drag unrelated rows in.
-    keywords:
-      'models model llm gateway providers provider budgets limits anthropic openai openrouter claude gpt gemini reasoning byok',
-  },
-  {
-    id: 'proj-chatgpt-usage',
-    label: 'ChatGPT subscription usage',
-    icon: Cpu,
-    group: 'navigation',
-    showIn: ['commandPalette'],
-    kind: 'navigate',
-    href: '/workspaces/{projectId}/admin/models?tab=providers&provider=openai',
-    requiresProject: true,
-    keywords: 'chatgpt openai codex subscription usage limits weekly allowance quota',
-  },
-  {
-    id: 'proj-claude-usage',
-    label: 'Claude subscription usage',
-    icon: Cpu,
-    group: 'navigation',
-    showIn: ['commandPalette'],
-    kind: 'navigate',
-    href: '/workspaces/{projectId}/admin/models?tab=providers&provider=anthropic',
-    requiresProject: true,
-    keywords: 'anthropic claude code subscription usage limits weekly allowance quota fable',
-  },
-  {
     id: 'proj-agents',
     label: 'Agents',
     icon: Bot,

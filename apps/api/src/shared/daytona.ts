@@ -134,6 +134,115 @@ export function isDaytonaDiskQuotaError(err: unknown): boolean {
   return msg.toLowerCase().includes(DISK_QUOTA_ERROR_SUBSTRING);
 }
 
+/**
+ * Matches Daytona org-wide compute/concurrency quota errors (e.g. "Total memory
+ * limit exceeded. Maximum allowed: 10GiB." or "Total CPU limit exceeded").
+ */
+export function isDaytonaComputeQuotaError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes('total memory limit exceeded') ||
+    msg.includes('total cpu limit exceeded') ||
+    msg.includes('concurrency limit') ||
+    (msg.includes('memory limit') && msg.includes('maximum allowed'))
+  );
+}
+
+export interface DaytonaStartedSandboxSummary {
+  id: string;
+  memory: number;
+  cpu: number;
+  lastActivityAt: string | null;
+  createdAt: string | null;
+}
+
+/**
+ * List org-wide STARTED Daytona sandboxes, oldest activity first, so the
+ * compute-quota guard can evict idle running sandboxes when RAM/CPU hits the
+ * org tier cap (e.g. 10 GiB = max 2 × 4 GiB sandboxes).
+ */
+export async function listStartedDaytonaSandboxesOldestFirst(
+  maxItems: number,
+): Promise<DaytonaStartedSandboxSummary[]> {
+  if (!config.DAYTONA_API_KEY) throw new Error('Missing DAYTONA_API_KEY');
+  const base = daytonaApiBase();
+  const out: DaytonaStartedSandboxSummary[] = [];
+  let cursor: string | null = null;
+  for (let guard = 0; guard < 20 && out.length < maxItems; guard++) {
+    const url = new URL(`${base}/sandbox`);
+    url.searchParams.set('limit', '100');
+    url.searchParams.set('states', 'started');
+    url.searchParams.set('sort', 'lastActivityAt');
+    url.searchParams.set('order', 'asc');
+    if (cursor) url.searchParams.set('cursor', cursor);
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${config.DAYTONA_API_KEY}` },
+      signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      throw new Error(`Daytona list started sandboxes failed: HTTP ${res.status}`);
+    }
+    const body = (await res.json()) as {
+      items?: Array<{
+        id: string;
+        memory?: number;
+        cpu?: number;
+        lastActivityAt?: string;
+        createdAt?: string;
+      }>;
+      nextCursor?: string | null;
+    };
+    const items = body.items ?? [];
+    for (const it of items) {
+      out.push({
+        id: it.id,
+        memory: it.memory ?? 4,
+        cpu: it.cpu ?? 2,
+        lastActivityAt: it.lastActivityAt ?? null,
+        createdAt: it.createdAt ?? null,
+      });
+      if (out.length >= maxItems) break;
+    }
+    cursor = body.nextCursor ?? null;
+    if (!cursor || items.length === 0) break;
+  }
+  return out;
+}
+
+/**
+ * Stop a running Daytona sandbox via REST API (reversible — preserves disk and
+ * session log; frees CPU/RAM immediately once stopped).
+ */
+export async function stopDaytonaSandboxById(id: string): Promise<boolean> {
+  if (!config.DAYTONA_API_KEY) return false;
+  try {
+    const res = await fetch(`${daytonaApiBase()}/sandbox/${id}/stop`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${config.DAYTONA_API_KEY}` },
+      signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
+    });
+    return res.ok || res.status === 404 || res.status === 409;
+  } catch {
+    return false;
+  }
+}
+
+/** Read a Daytona sandbox's current state string via REST API, or null on 404/error. */
+export async function getDaytonaSandboxStateById(id: string): Promise<string | null> {
+  if (!config.DAYTONA_API_KEY) return null;
+  try {
+    const res = await fetch(`${daytonaApiBase()}/sandbox/${id}`, {
+      headers: { Authorization: `Bearer ${config.DAYTONA_API_KEY}` },
+      signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { state?: string };
+    return typeof body.state === 'string' ? body.state.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface DaytonaStoppedSandboxSummary {
   id: string;
   disk: number;

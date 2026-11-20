@@ -29,10 +29,13 @@ export interface Deployment {
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
-export const KORTIX_CLOUD_WEB_URL = 'https://kortix.com';
+export const KORTIX_CLOUD_WEB_URL = 'https://kortix-computer-app.netlify.app';
 /** The self-hosting section of the docs (`apps/web/content/docs/developers.mdx`), behind the sheet's Docs button. */
 export const SELF_HOST_DOCS_URL = `${KORTIX_CLOUD_WEB_URL}/docs/developers#self-hosting`;
-const DEFAULT_BACKEND_URL = 'http://localhost:8008/v1';
+const DEFAULT_BACKEND_URL = 'https://kortix-api-production-20b48504.up.railway.app/v1';
+const DEFAULT_SUPABASE_URL = 'https://qeqfblzxfofaynevchbd.supabase.co';
+const DEFAULT_SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFlcWZibHp4Zm9mYXluZXZjaGJkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTUxMDE3NDYsImV4cCI6MjExMDY3Nzc0Nn0.1pgjoyrXDf-q9o_ivWYDA4C03UTsjMzC48sz4H6GqCg';
 const PROBE_TIMEOUT_MS = 8_000;
 
 function bareHost(hostname: string): string {
@@ -342,6 +345,7 @@ export interface BuildEnv {
   EXPO_PUBLIC_SUPABASE_URL?: string;
   EXPO_PUBLIC_SUPABASE_ANON_KEY?: string;
   EXPO_PUBLIC_AUTH_METHODS?: string;
+  EXPO_PUBLIC_WEB_URL?: string;
 }
 
 /** Every endpoint the app uses, from one place: the saved deployment, else the build. */
@@ -356,10 +360,9 @@ export function resolveEndpoints(deployment: Deployment | null, env: BuildEnv) {
   }
   return {
     backendUrl: env.EXPO_PUBLIC_BACKEND_URL || DEFAULT_BACKEND_URL,
-    supabaseUrl: env.EXPO_PUBLIC_SUPABASE_URL ?? '',
-    supabaseAnonKey: env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '',
-    // Always kortix.com for the build default (lib/kortix-web.ts).
-    webUrl: KORTIX_CLOUD_WEB_URL,
+    supabaseUrl: env.EXPO_PUBLIC_SUPABASE_URL || DEFAULT_SUPABASE_URL,
+    supabaseAnonKey: env.EXPO_PUBLIC_SUPABASE_ANON_KEY || DEFAULT_SUPABASE_ANON_KEY,
+    webUrl: env.EXPO_PUBLIC_WEB_URL || KORTIX_CLOUD_WEB_URL,
   };
 }
 

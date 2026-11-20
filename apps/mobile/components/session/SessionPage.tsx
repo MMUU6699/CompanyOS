@@ -928,16 +928,10 @@ function SessionPageImpl({ sessionId, projectId, projectSessionId, onBack, onOpe
     isLoading: modelsLoading,
     refetchModelCount,
   } = useComposerModels(projectId ?? null);
-  // A project that offers no model: Send opens the connect sheet instead of
-  // posting (KRTX-251).
-  const modelUnavailable = isModelUnavailable({
-    loading: modelsLoading,
-    modelCount: offeredModelCount(models),
-  });
+  // Backend locks a single always-available model (NVIDIA Gemma 4 31B).
+  const modelUnavailable = false;
   const connectSheetRef = useRef<SheetRef>(null);
-  const handleConnectModel = useCallback(() => {
-    if (projectId) connectSheetRef.current?.open();
-  }, [projectId]);
+  const handleConnectModel = useCallback(() => {}, []);
   // The in-chat connector hand-off (COR-158): one `ConnectorAuthSheet`
   // instance, shared by every `ConnectorConnectRow` in the transcript — same
   // "one shared sheet" shape as `connectSheetRef` above.

@@ -72,6 +72,41 @@ let goTrueLoader: GoTrueLoader = askGoTrue;
 let lastLookupWarningAt = -Infinity;
 let sessionLoader: SessionLoader = askDatabase;
 
+// Short-TTL positive cache for DB session-liveness lookups so concurrent bursts
+// (workspace + sessions + billing + log reads on screen open) avoid repeating
+// identical `auth.sessions` round trips. Negative verdicts are never cached, so
+// sign-out / bans still fail closed on expiry, and test seams bypass the cache.
+const LIVE_SESSION_CACHE_TTL_MS = 15_000;
+const LIVE_SESSION_CACHE_MAX = 2_000;
+const liveSessionCache = new Map<string, { user: LiveUser; expiresAt: number }>();
+
+function getCachedLiveUser(userId: string, sessionId: string): LiveUser | null {
+  const key = `${userId}:${sessionId}`;
+  const hit = liveSessionCache.get(key);
+  if (!hit) return null;
+  if (Date.now() >= hit.expiresAt) {
+    liveSessionCache.delete(key);
+    return null;
+  }
+  return hit.user;
+}
+
+function setCachedLiveUser(userId: string, sessionId: string, user: LiveUser): void {
+  const now = Date.now();
+  if (liveSessionCache.size >= LIVE_SESSION_CACHE_MAX) {
+    for (const [k, v] of liveSessionCache) {
+      if (v.expiresAt <= now) liveSessionCache.delete(k);
+    }
+    if (liveSessionCache.size >= LIVE_SESSION_CACHE_MAX) {
+      liveSessionCache.clear();
+    }
+  }
+  liveSessionCache.set(`${userId}:${sessionId}`, {
+    user,
+    expiresAt: now + LIVE_SESSION_CACHE_TTL_MS,
+  });
+}
+
 /**
  * The live user behind a verified `token`, or null when its session is gone.
  * Throws when neither the DB nor GoTrue can answer.
@@ -79,8 +114,15 @@ let sessionLoader: SessionLoader = askDatabase;
 export async function confirmJwtLive(token: string, claims: SessionClaims): Promise<LiveUser | null> {
   const sessionId = claims.session_id;
   if (hasDatabase && sessionId && isUuid(sessionId) && isUuid(claims.sub)) {
+    const useCache = sessionLoader === askDatabase;
+    if (useCache) {
+      const cached = getCachedLiveUser(claims.sub, sessionId);
+      if (cached) return cached;
+    }
     try {
-      return await sessionLoader(claims.sub, sessionId);
+      const user = await sessionLoader(claims.sub, sessionId);
+      if (useCache && user) setCachedLiveUser(claims.sub, sessionId, user);
+      return user;
     } catch (err) {
       // GoTrue answers instead. One line a minute: a lookup that always fails
       // (no grant on `auth`, an API DB that is not GoTrue's) puts every
@@ -114,5 +156,6 @@ export function __setJwtLivenessLoaderForTests(next: GoTrueLoader | null): void 
 
 /** Test seam: replace the `auth.sessions` lookup (null restores it). */
 export function __setSessionLivenessLoaderForTests(next: SessionLoader | null): void {
+  liveSessionCache.clear();
   sessionLoader = next ?? askDatabase;
 }

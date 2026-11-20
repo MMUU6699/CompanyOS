@@ -133,7 +133,9 @@ function isExpectedAuthCallbackUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     return (
-      parsed.protocol === 'kortix:' && parsed.hostname === 'auth' && parsed.pathname === '/callback'
+      (parsed.protocol === 'kortix:' || parsed.protocol === 'exp+kortix:') &&
+      parsed.hostname === 'auth' &&
+      parsed.pathname === '/callback'
     );
   } catch {
     return false;
@@ -933,7 +935,7 @@ export function useAuth() {
       setError(null);
 
       const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: 'kortix://auth/reset-password',
+        redirectTo: `${KORTIX_WEB_URL}/auth/reset-password`,
       });
 
       if (resetError) {

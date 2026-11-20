@@ -87,7 +87,7 @@ function ResolvedArtifactLink({ href, raw, children }: ArtifactLinkProps) {
 export function isArtifactLink(href: string): boolean {
   if (!parseArtifactUrl(href)) return false;
   try {
-    const url = new URL(href, "https://kortix.com");
+    const url = new URL(href, "https://kortix-computer-app.netlify.app");
     if (
       !["http:", "https:"].includes(url.protocol) ||
       url.username ||
@@ -95,11 +95,10 @@ export function isArtifactLink(href: string): boolean {
     )
       return false;
     return (
-      (href.startsWith("/") && url.origin === "https://kortix.com") ||
+      (href.startsWith("/") && url.origin === "https://kortix-computer-app.netlify.app") ||
       (url.protocol === "https:" &&
         !url.port &&
-        (url.hostname === "kortix.com" ||
-          url.hostname.endsWith(".kortix.com"))) ||
+        url.hostname === "kortix-computer-app.netlify.app") ||
       (typeof window !== "undefined" && url.origin === window.location.origin)
     );
   } catch {

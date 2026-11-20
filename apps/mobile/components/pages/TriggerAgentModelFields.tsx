@@ -103,52 +103,14 @@ export function AgentPickerField({
 
 // ─── Model ────────────────────────────────────────────────────────────────────
 
-export function ModelPickerField({
-  projectId,
-  value,
-  onChange,
-  flush = false,
-  disabled = false,
-}: {
+export function ModelPickerField(_props: {
   projectId: string;
-  /** Selected wire model id, or null to resolve the agent/account/platform default at fire time. */
   value: string | null;
   onChange: (modelID: string | null) => void;
-  /** No top margin: the parent's gap spaces the field. */
   flush?: boolean;
-  /** Shows the value without opening: a viewer who may not update the trigger. */
   disabled?: boolean;
-  /** @deprecated The field reads the theme itself. Ignored. */
   isDark?: boolean;
 }) {
-  const contentInsets = useContentInsets();
-  const { models, isLoading } = useProjectModelCatalogForTrigger(projectId);
-
-  const current = value ? models.find((model) => model.modelID === value) : undefined;
-  const selected: Option = value
-    ? { value, label: current?.modelName ?? value }
-    : { value: DEFAULT_MODEL_VALUE, label: 'Default model' };
-
-  return (
-    <View className={flush ? 'gap-2' : 'mt-5 gap-2'}>
-      <FieldTitle nativeID="trigger-model">Model</FieldTitle>
-      <Select
-        value={selected}
-        onValueChange={(option) => {
-          if (!option) return;
-          haptics.selection();
-          onChange(option.value === DEFAULT_MODEL_VALUE ? null : option.value);
-        }}>
-        <SelectTrigger aria-labelledby="trigger-model" className={TRIGGER_CLASS} disabled={disabled || isLoading}>
-          <SelectValue placeholder={isLoading ? 'Loading models…' : 'Default model'} className="text-base" />
-        </SelectTrigger>
-        <SelectContent portalHost={OVERLAY_PORTAL_HOST} insets={contentInsets} className="w-72">
-          <SelectItem value={DEFAULT_MODEL_VALUE} label="Default model" />
-          {models.map((model) => (
-            <SelectItem key={model.modelID} value={model.modelID} label={model.modelName} />
-          ))}
-        </SelectContent>
-      </Select>
-    </View>
-  );
+  // Model selection is disabled; backend locks inference to NVIDIA Gemma 4 31B.
+  return null;
 }

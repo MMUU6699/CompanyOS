@@ -86,14 +86,232 @@ export function upstreamHeaders(descriptor: UpstreamDescriptor, requestId?: stri
   return headers;
 }
 
+const OPENROUTER_HOST = 'openrouter.ai';
+const OPENROUTER_FREE_ROUTER = 'openrouter/free';
+const OPENROUTER_DEFAULT_MAX_TOKENS = 8192;
+const OPENROUTER_MIN_OUTPUT_TOKENS = 4096;
+const OPENROUTER_MAX_OUTPUT_TOKENS = 16384;
+const OPENROUTER_NATIVE_MODELS_MAX = 3;
+
+/**
+ * STRICT ZERO-COST GUARD: only OpenRouter `:free` models and the
+ * `openrouter/free` free-only router may ever be sent upstream.
+ */
+export function isAllowedFreeOpenRouterModelId(modelId: unknown): modelId is string {
+  if (typeof modelId !== 'string') return false;
+  const trimmed = modelId.trim();
+  if (!trimmed) return false;
+  return trimmed === OPENROUTER_FREE_ROUTER || trimmed.endsWith(':free');
+}
+
+export function assertFreeOpenRouterModelId(modelId: unknown, context = 'model'): string {
+  if (!isAllowedFreeOpenRouterModelId(modelId)) {
+    throw new UpstreamMisconfiguredError(
+      'openrouter',
+      `Refused non-free OpenRouter ${context} "${String(modelId ?? '')}": only ":free" models or "openrouter/free" are permitted.`,
+    );
+  }
+  return modelId.trim();
+}
+
+function isOpenRouterDescriptor(descriptor: UpstreamDescriptor): boolean {
+  if (descriptor.provider === 'openrouter') return true;
+  try {
+    const host = new URL(descriptor.baseUrl).hostname.toLowerCase();
+    return host === OPENROUTER_HOST || host.endsWith(`.${OPENROUTER_HOST}`);
+  } catch {
+    return false;
+  }
+}
+
+function buildOpenRouterFreePayload(
+  body: Record<string, unknown>,
+  descriptor: UpstreamDescriptor,
+): Record<string, unknown> {
+  const {
+    max_completion_tokens: maxCompletionTokens,
+    chat_template_kwargs: _droppedTemplateKwargs,
+    enable_thinking: _droppedThinking,
+    ...rest
+  } = body;
+
+  const primaryModel = assertFreeOpenRouterModelId(
+    descriptor.resolvedModel || rest.model,
+    'primary model',
+  );
+
+  // Validate every single native fallback candidate and cap at OpenRouter's
+  // hard 3-model limit for the `models` array.
+  const rawFallbacks = [primaryModel, ...(descriptor.fallbackModels ?? [])];
+  const uniqueFreeModels: string[] = [];
+  for (const candidate of rawFallbacks) {
+    const safeId = assertFreeOpenRouterModelId(candidate, 'fallback model');
+    if (!uniqueFreeModels.includes(safeId)) {
+      uniqueFreeModels.push(safeId);
+    }
+    if (uniqueFreeModels.length >= OPENROUTER_NATIVE_MODELS_MAX) break;
+  }
+
+  const requestedMaxTokens =
+    typeof rest.max_tokens === 'number' && Number.isFinite(rest.max_tokens) && rest.max_tokens > 0
+      ? Math.floor(rest.max_tokens)
+      : typeof maxCompletionTokens === 'number' && Number.isFinite(maxCompletionTokens) && maxCompletionTokens > 0
+        ? Math.floor(maxCompletionTokens)
+        : OPENROUTER_DEFAULT_MAX_TOKENS;
+
+  const maxTokens = Math.min(
+    OPENROUTER_MAX_OUTPUT_TOKENS,
+    Math.max(requestedMaxTokens, OPENROUTER_MIN_OUTPUT_TOKENS),
+  );
+
+  const payload: Record<string, unknown> = {
+    ...rest,
+    model: primaryModel,
+    max_tokens: maxTokens,
+    stream: Boolean(rest.stream),
+  };
+
+  if (uniqueFreeModels.length > 1) {
+    payload.models = uniqueFreeModels;
+    payload.route = 'fallback';
+  } else {
+    delete payload.models;
+    delete payload.route;
+  }
+
+  return payload;
+}
+
+/**
+ * Validates a non-streaming HTTP 200 OpenRouter JSON response before returning
+ * it to the client. Embedded error objects, empty assistant outputs, or
+ * malformed tool-call argument JSON trigger an `UpstreamHttpError(502)` so
+ * `dispatch()` automatically fails over to the next `:free` model.
+ */
+async function validateNonStreamingOpenRouterResponse(response: Response): Promise<Response> {
+  if (!response.ok) return response;
+  const raw = await response.text();
+  let parsed: Record<string, any>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, any>;
+  } catch {
+    throw new UpstreamHttpError(502, `Invalid JSON response from OpenRouter: ${raw.slice(0, 200)}`, 'openrouter');
+  }
+  if (parsed?.error && typeof parsed.error === 'object') {
+    const code = Number((parsed.error as { code?: unknown }).code);
+    throw new UpstreamHttpError(
+      code >= 400 && code <= 599 ? code : 502,
+      raw.slice(0, 500),
+      'openrouter',
+    );
+  }
+  const choice = Array.isArray(parsed?.choices) ? parsed.choices[0] : null;
+  const msg = choice?.message;
+  const hasContent = typeof msg?.content === 'string' && msg.content.trim().length > 0;
+  const hasReasoning =
+    (typeof msg?.reasoning === 'string' && msg.reasoning.trim().length > 0) ||
+    (typeof msg?.reasoning_content === 'string' && msg.reasoning_content.trim().length > 0);
+  const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
+  if (!hasContent && !hasReasoning && toolCalls.length === 0) {
+    throw new UpstreamHttpError(502, 'Empty assistant response from OpenRouter free model', 'openrouter');
+  }
+  for (const tc of toolCalls) {
+    const args = tc?.function?.arguments;
+    if (typeof args === 'string' && args.trim().length > 0) {
+      try {
+        JSON.parse(args);
+      } catch {
+        throw new UpstreamHttpError(
+          502,
+          `Malformed tool_call JSON from OpenRouter free model (${tc?.function?.name ?? 'unknown'})`,
+          'openrouter',
+        );
+      }
+    }
+  }
+  return new Response(raw, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+const NVIDIA_NIM_HOST = 'integrate.api.nvidia.com';
+const NVIDIA_LOCKED_MODEL = 'google/gemma-4-31b-it';
+const NVIDIA_DEFAULT_MAX_TOKENS = 8192;
+const NVIDIA_MIN_THINKING_MAX_TOKENS = 4096;
+const NVIDIA_MAX_OUTPUT_TOKENS = 8192;
+
+function isNvidiaNimDescriptor(descriptor: UpstreamDescriptor): boolean {
+  if (descriptor.provider === 'nvidia') return true;
+  try {
+    return new URL(descriptor.baseUrl).hostname === NVIDIA_NIM_HOST;
+  } catch {
+    return false;
+  }
+}
+
+function buildNvidiaNimPayload(
+  body: Record<string, unknown>,
+  descriptor: UpstreamDescriptor,
+): Record<string, unknown> {
+  const {
+    max_completion_tokens: maxCompletionTokens,
+    chat_template_kwargs: existingTemplateKwargs,
+    reasoning_effort: _ignoredEffort,
+    ...rest
+  } = body;
+  const requestedMaxTokens =
+    typeof rest.max_tokens === 'number' && Number.isFinite(rest.max_tokens) && rest.max_tokens > 0
+      ? Math.floor(rest.max_tokens)
+      : typeof maxCompletionTokens === 'number' && Number.isFinite(maxCompletionTokens) && maxCompletionTokens > 0
+        ? Math.floor(maxCompletionTokens)
+        : NVIDIA_DEFAULT_MAX_TOKENS;
+  // With enable_thinking: true, Gemma 4 31B emits reasoning tokens before tool
+  // calls and prose. A 1024-token ceiling truncates tool calls and answers;
+  // keep a safe 4096..8192 output window matching NVIDIA_LOCKED_MANAGED_MODEL.
+  const maxTokens = Math.min(
+    NVIDIA_MAX_OUTPUT_TOKENS,
+    Math.max(requestedMaxTokens, NVIDIA_MIN_THINKING_MAX_TOKENS),
+  );
+  const templateKwargs =
+    existingTemplateKwargs && typeof existingTemplateKwargs === 'object' && !Array.isArray(existingTemplateKwargs)
+      ? { ...(existingTemplateKwargs as Record<string, unknown>), enable_thinking: true }
+      : { enable_thinking: true };
+
+  return {
+    ...rest,
+    model: descriptor.resolvedModel || NVIDIA_LOCKED_MODEL,
+    max_tokens: maxTokens,
+    stream: Boolean(rest.stream),
+    temperature: typeof rest.temperature === 'number' ? rest.temperature : 1,
+    top_p: typeof rest.top_p === 'number' ? rest.top_p : 0.95,
+    frequency_penalty: typeof rest.frequency_penalty === 'number' ? rest.frequency_penalty : 0,
+    presence_penalty: typeof rest.presence_penalty === 'number' ? rest.presence_penalty : 0,
+    seed: typeof rest.seed === 'number' ? rest.seed : 0,
+    chat_template_kwargs: templateKwargs,
+  };
+}
+
 async function directOpenAiRequest(
   body: Record<string, unknown>,
   descriptor: UpstreamDescriptor,
   opts: CallUpstreamOptions,
 ): Promise<Response> {
   const headers = upstreamHeaders(descriptor, opts.requestId);
+  const isOpenRouter = isOpenRouterDescriptor(descriptor);
+  const isNvidia = !isOpenRouter && isNvidiaNimDescriptor(descriptor);
+  if (isNvidia || isOpenRouter) {
+    headers.accept = body.stream ? 'text/event-stream' : 'application/json';
+  }
 
-  const payload = descriptor.resolvedModel ? { ...body, model: descriptor.resolvedModel } : body;
+  const payload = isOpenRouter
+    ? buildOpenRouterFreePayload(body, descriptor)
+    : isNvidia
+      ? buildNvidiaNimPayload(body, descriptor)
+      : descriptor.resolvedModel
+        ? { ...body, model: descriptor.resolvedModel }
+        : body;
 
   const fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init));
   const url = `${trimTrailingSlash(descriptor.baseUrl)}/chat/completions`;
@@ -155,6 +373,7 @@ export async function openDirectStream(
     timer = setTimeout(() => resolve('commit'), signal?.aborted ? 0 : commitAfterMs);
     signal?.addEventListener('abort', () => resolve('commit'), { once: true });
   });
+  let sawDataFrame = false;
   try {
     while (text.length <= DIRECT_STREAM_PEEK_MAX_CHARS) {
       const reading = reader.read();
@@ -166,25 +385,38 @@ export async function openDirectStream(
         break;
       }
       inFlight = null;
-      if (next.done) break;
+      if (next.done) {
+        if (!sawDataFrame) {
+          throw new UpstreamHttpError(502, 'Upstream stream ended with no data frames', provider);
+        }
+        break;
+      }
       read.push(next.value);
       text += decoder.decode(next.value, { stream: true });
       const complete = text.slice(0, text.lastIndexOf('\n') + 1);
-      const line = complete.split('\n').find((l) => l.startsWith('data:'));
-      if (!line) continue;
-      const payload = line.slice(5).trim();
-      let error: { code?: unknown } | undefined;
-      try {
-        error = (JSON.parse(payload) as { error?: { code?: unknown } }).error;
-      } catch {
-        // `[DONE]` or a non-JSON frame: not an error frame.
+      const dataLines = complete.split('\n').filter((l) => l.startsWith('data:'));
+      if (dataLines.length === 0) continue;
+      let sawNonDone = false;
+      for (const line of dataLines) {
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        let error: { code?: unknown } | undefined;
+        try {
+          error = (JSON.parse(payload) as { error?: { code?: unknown } }).error;
+        } catch {
+          // Non-JSON frame: not an error frame.
+        }
+        if (error && typeof error === 'object') {
+          await reader.cancel().catch(() => {});
+          const code = Number(error.code);
+          throw new UpstreamHttpError(code >= 400 && code <= 599 ? code : 502, payload, provider);
+        }
+        sawNonDone = true;
       }
-      if (error && typeof error === 'object') {
-        await reader.cancel().catch(() => {});
-        const code = Number(error.code);
-        throw new UpstreamHttpError(code >= 400 && code <= 599 ? code : 502, payload, provider);
+      if (sawNonDone) {
+        sawDataFrame = true;
+        break;
       }
-      break;
     }
   } finally {
     clearTimeout(timer);
@@ -225,7 +457,11 @@ export async function callUpstream(
     const google = isGoogleOpenAiUpstream(descriptor);
     const sent = google ? restoreGeminiThoughtSignatures(body, descriptor.resolvedModel) : body;
     const response = await directOpenAiRequest(sent, descriptor, opts);
-    const opened = streaming ? await openDirectStream(response, descriptor.provider, { signal: clientSignal }) : response;
+    const opened = streaming
+      ? await openDirectStream(response, descriptor.provider, { signal: clientSignal })
+      : isOpenRouterDescriptor(descriptor)
+        ? await validateNonStreamingOpenRouterResponse(response)
+        : response;
     return google ? exposeGeminiThoughtSignaturesInResponse(opened, streaming) : opened;
   }
 

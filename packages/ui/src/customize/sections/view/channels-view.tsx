@@ -777,28 +777,6 @@ function ChannelSettingsModalContent({
               </FieldDescription>
             </Field>
 
-            <Field data-disabled={!canWrite}>
-              <FieldTitle>{tI18nComplete.raw('text5e2c614c23f0')}</FieldTitle>
-              <ModelSelector
-                models={models}
-                providers={providers}
-                selectedModel={model}
-                unsetLabel={tI18nComplete.raw('texte8cb80e5c5cb')}
-                onSelect={setModelDraft}
-                disabled={!canWrite}
-                appearance="field"
-              />
-              <FieldDescription className="text-xs">
-                {/* What the unset or refused pin runs instead, when it is known. */}
-                {modelDraft === undefined &&
-                binding.effectiveModel.source !== 'explicit' &&
-                (binding.model || binding.effectiveModel.model)
-                  ? `${describeEffectiveModel(binding)}. `
-                  : null}
-                {tI18nComplete.raw('text9116af1ce384')}
-              </FieldDescription>
-            </Field>
-
             {/* Who may join a session is Slack's and Teams' (linked members). Discord and
                 Telegram admit the project's allowed users only: no policy to pick. */}
             {binding.platform === 'slack' || binding.platform === 'teams' ? (

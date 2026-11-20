@@ -22,9 +22,11 @@
  */
 
 import { type SessionTranscriptSyncEnvelope, getSessionTurn } from '../rest/projects-client/sessions';
+import { savedSessionLogCopies } from '../session-log/saved-log';
 import { loadSessionLogPage, readFirstSessionLogAnswer, type SessionLogPage } from '../session-log/source';
 import { EMPTY_SESSION_LOG_STATE, applySessionLogPage } from '../session-log/store';
 import { sessionLogRoot } from '../session-log/v1-view';
+import { currentSavedCopyStore } from './saved-copy-store';
 
 export interface SavedSessionCopy {
   /**
@@ -58,12 +60,31 @@ export interface SavedSessionCopy {
  *
  * The turn record is read only when the page proves `runtimeSessionId` empty. Never throws.
  */
+/**
+ * Read the device's locally cached v2 session-log page for instant frame-0
+ * rendering while the session wakes and before the network `GET …/log` lands.
+ * Never throws.
+ */
+export async function readLocalSavedSessionLog(
+  projectId: string,
+  sessionId: string,
+): Promise<SessionLogPage | null> {
+  if (!projectId || !sessionId) return null;
+  try {
+    const store = savedSessionLogCopies(currentSavedCopyStore());
+    if (!store) return null;
+    return (await store.read(projectId, sessionId)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function readSavedSessionCopy(input: {
   projectId: string;
   /** The Kortix session id. */
   sessionId: string;
-  /** The runtime session the copy belongs to (the root). */
-  runtimeSessionId: string;
+  /** The runtime session the copy belongs to (the root); optional when reading `GET …/log`. */
+  runtimeSessionId?: string | null;
   /**
    * @deprecated Ignored: the session log is always read, and no v1 window. The project flag
    * `session_log` it carried is gone.
@@ -71,12 +92,21 @@ export async function readSavedSessionCopy(input: {
   sessionLog?: boolean;
 }): Promise<SavedSessionCopy> {
   const { projectId, sessionId, runtimeSessionId } = input;
-  if (!projectId || !sessionId || !runtimeSessionId) return { envelope: null, empty: false };
+  if (!projectId || !sessionId) return { envelope: null, empty: false };
   const log = await readFirstSessionLogAnswer(loadSessionLogPage, projectId, sessionId);
   if (!log || log === 'missing') return { envelope: null, empty: false, log: null };
+  if (log.messages.length > 0) {
+    const store = savedSessionLogCopies(currentSavedCopyStore());
+    if (store) void store.write(projectId, sessionId, log).catch(() => {});
+  }
   const root = sessionLogRoot(applySessionLogPage(EMPTY_SESSION_LOG_STATE, log));
-  const provenEmpty = !!root?.empty && root.runtimeSessionId === runtimeSessionId;
-  return { envelope: null, empty: provenEmpty && (await noTurnSince(projectId, sessionId, runtimeSessionId)), log };
+  const resolvedRootId = runtimeSessionId || root?.runtimeSessionId || null;
+  const provenEmpty = !!root?.empty && !!resolvedRootId && root.runtimeSessionId === resolvedRootId;
+  return {
+    envelope: null,
+    empty: provenEmpty && resolvedRootId ? await noTurnSince(projectId, sessionId, resolvedRootId) : false,
+    log,
+  };
 }
 
 /**

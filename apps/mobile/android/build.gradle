@@ -1,6 +1,9 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
 buildscript {
+  ext {
+    ndkVersion = "28.2.13676358"
+  }
   repositories {
     google()
     mavenCentral()
@@ -14,6 +17,26 @@ buildscript {
 }
 
 allprojects {
+  if (project != rootProject && project.name != "app") {
+    def shortKey = Integer.toHexString(project.name.hashCode())
+    project.layout.buildDirectory.set(new File("E:/b/android/${project.name}"))
+    project.plugins.withId("com.android.library") {
+      project.android {
+        externalNativeBuild {
+          cmake {
+            buildStagingDirectory = new File("E:/c/${shortKey}")
+          }
+        }
+        defaultConfig {
+          externalNativeBuild {
+            cmake {
+              arguments "-DCMAKE_OBJECT_PATH_MAX=160"
+            }
+          }
+        }
+      }
+    }
+  }
   repositories {
     google()
     mavenCentral()

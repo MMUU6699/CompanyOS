@@ -104,74 +104,39 @@ interface ModelPickerSheetProps {
 
 /** Memoized: the composer around it re-renders on every keystroke and passes stable props. */
 export const ModelPickerSheet = React.memo(React.forwardRef<SheetRef, ModelPickerSheetProps>(
-  ({ options, activeKey, onSelect, thinking, onConnect, agent, autoContinue }, ref) => {
+  ({ agent, autoContinue }, ref) => {
     const pickerRef = React.useRef<SheetRef>(null);
-    const [tab, setTab] = React.useState(MODEL_TAB);
 
     const agentOptions = React.useMemo<PickerOption[]>(
       () => (agent?.agents ?? []).filter(isSelectableAgent).map((a) => ({ key: a.name, label: agentDisplayName(a.name) })),
       [agent?.agents],
     );
-    const hasAgentTab = !!agent && (agentOptions.length >= 2 || !!agent.onCreate);
-    const onAgentTab = hasAgentTab && tab === AGENT_TAB;
+    const hasAgents = !!agent && (agentOptions.length >= 1 || !!agent.onCreate);
 
-    // Every open starts on Model: the pill the user tapped names the model.
     React.useImperativeHandle(ref, () => ({
       open: () => {
-        setTab(MODEL_TAB);
-        pickerRef.current?.open();
+        if (hasAgents || autoContinue) pickerRef.current?.open();
       },
       close: () => pickerRef.current?.close(),
     }));
 
-    const tabs = React.useMemo(
-      () => (hasAgentTab ? { items: TABS, activeIndex: tab, onSelect: setTab } : undefined),
-      [hasAgentTab, tab],
-    );
-
-    const onAgent = onAgentTab && !!agent;
-    const pickerProps = onAgent
-      ? {
-          title: 'Agent',
-          options: agentOptions,
-          activeKey: agent?.activeName,
-          searchLabel: 'Search agents',
-          emptyLabel: 'No matching agents',
-          // Web's copy (model-selector.tsx, the truly-empty state) is the
-          // Model tab's alone.
-          empty: undefined as { title: string; actionLabel: string; onAction: () => void } | undefined,
-        }
-      : {
-          title: 'Model',
-          options,
-          activeKey,
-          searchLabel: 'Search models',
-          emptyLabel: 'No matching models',
-          empty: onConnect
-            ? { title: 'No models available', actionLabel: 'Connect provider', onAction: onConnect }
-            : undefined,
-        };
+    if (!hasAgents && !autoContinue) return null;
 
     return (
       <PickerSheet
         ref={pickerRef}
-        {...pickerProps}
-        onSelect={
-          onAgent
-            ? (name) => {
-                // An agent is picked on the way to a model: go straight there.
-                agent?.onSelect(name);
-                setTab(MODEL_TAB);
-              }
-            : onSelect
-        }
-        // Stays open after a pick (Jay, 2026-09-21): the check moves, the
-        // Thinking slider switches to the new model's levels, and the user
-        // closes the sheet with a swipe or a tap outside when done.
-        closeOnSelect={false}
-        tabs={tabs}
+        title="Agent"
+        options={agentOptions}
+        activeKey={agent?.activeName ?? null}
+        searchLabel="Search agents"
+        emptyLabel="No matching agents"
+        onSelect={(name) => {
+          agent?.onSelect(name);
+          pickerRef.current?.close();
+        }}
+        closeOnSelect
         titleTrailing={
-          onAgent && agent?.onCreate ? (
+          agent?.onCreate ? (
             <Button
               variant="ghost"
               size="icon"
@@ -187,20 +152,15 @@ export const ModelPickerSheet = React.memo(React.forwardRef<SheetRef, ModelPicke
             </Button>
           ) : undefined
         }>
-        {!onAgent ? (
-          <>
-            {thinking && thinking.levels.length > 0 ? <ThinkingControl {...thinking} /> : null}
-            {autoContinue ? (
-              <SettingsGroup>
-                <SettingsRow
-                  icon={InfinityIcon}
-                  label="AutoContinue"
-                  value={autoContinue.value}
-                  onPress={autoContinue.onPress}
-                />
-              </SettingsGroup>
-            ) : null}
-          </>
+        {autoContinue ? (
+          <SettingsGroup>
+            <SettingsRow
+              icon={InfinityIcon}
+              label="AutoContinue"
+              value={autoContinue.value}
+              onPress={autoContinue.onPress}
+            />
+          </SettingsGroup>
         ) : null}
       </PickerSheet>
     );

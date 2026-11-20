@@ -9,7 +9,7 @@ import { setupPrompt, setupTarget } from '@kortix/shared/setup-guide';
  * and pushes `kortix.yaml` to the branch the workspace reads.
  */
 
-export const EXISTING_REPO_DOCS_URL = 'https://kortix.com/docs/developers#set-up-an-existing-repository';
+export const EXISTING_REPO_DOCS_URL = 'https://kortix-computer-app.netlify.app/docs/developers#set-up-an-existing-repository';
 
 export function existingRepoSetupPrompt(input: {
   /** `owner/name`, or the clone URL when the name is unknown. */

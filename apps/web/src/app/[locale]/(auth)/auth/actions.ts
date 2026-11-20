@@ -440,6 +440,8 @@ export async function resetPassword(prevState: any, formData: FormData) {
   const tI18nComplete = await getTranslations('hardcodedUi.i18nComplete');
   const password = formData.get('password') as string;
   const confirmPassword = formData.get('confirmPassword') as string;
+  const tokenHash = (formData.get('tokenHash') as string | null)?.trim() || '';
+  const code = (formData.get('code') as string | null)?.trim() || '';
 
   if (!password || password.length < 6) {
     return { message: tI18nComplete.raw('text2005290ddda9') };
@@ -450,6 +452,27 @@ export async function resetPassword(prevState: any, formData: FormData) {
   }
 
   const supabase = await createClient();
+
+  if (tokenHash) {
+    const { error: verifyError } = await supabase.auth.verifyOtp({
+      token_hash: tokenHash,
+      type: 'recovery',
+    });
+    if (verifyError) {
+      const { data: existing } = await supabase.auth.getUser();
+      if (!existing?.user) {
+        return authFailure(verifyError, 'This reset link is invalid or has expired.', tI18nComplete);
+      }
+    }
+  } else if (code) {
+    const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+    if (exchangeError) {
+      const { data: existing } = await supabase.auth.getUser();
+      if (!existing?.user) {
+        return authFailure(exchangeError, 'This reset link is invalid or has expired.', tI18nComplete);
+      }
+    }
+  }
 
   const { error } = await supabase.auth.updateUser({
     password,

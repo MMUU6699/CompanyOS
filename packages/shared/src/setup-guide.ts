@@ -19,7 +19,10 @@ export interface SetupTarget {
   apiBase: string;
 }
 
-export const PROD_TARGET: SetupTarget = { origin: 'https://kortix.com', apiBase: 'https://api.kortix.com' };
+export const PROD_TARGET: SetupTarget = {
+  origin: 'https://kortix-computer-app.netlify.app',
+  apiBase: 'https://kortix-api-production-20b48504.up.railway.app',
+};
 
 const trim = (url: string) => {
   let out = url.trim();

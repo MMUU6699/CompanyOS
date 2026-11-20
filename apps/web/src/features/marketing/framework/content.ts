@@ -16,7 +16,7 @@
  */
 
 export const MANIFEST = [
-  "# yaml-language-server: $schema=https://kortix.com/schema/kortix.schema.json",
+  "# yaml-language-server: $schema=https://kortix-computer-app.netlify.app/schema/kortix.schema.json",
   "default_agent: kortix",
   "",
   "project:",

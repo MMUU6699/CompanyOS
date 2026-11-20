@@ -6,7 +6,7 @@
  * advertises the route on all of them. An explicit empty value keeps /blog
  * unserved.
  */
-const DEFAULT_BLOG_ORIGIN = 'https://kortix.com';
+const DEFAULT_BLOG_ORIGIN = 'https://kortix-computer-app.netlify.app';
 
 function resolveBlogOrigin(origin: string | undefined): string | undefined {
   if (origin === undefined) return DEFAULT_BLOG_ORIGIN;

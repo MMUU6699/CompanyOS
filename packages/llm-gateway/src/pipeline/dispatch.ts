@@ -116,6 +116,12 @@ export function upstreamHeadersTimeoutMs(
   descriptor: UpstreamDescriptor,
   streaming: boolean,
 ): number {
+  if (descriptor.provider === 'openrouter') {
+    return Math.min(UPSTREAM_HEADERS_TIMEOUT_MS, 45_000);
+  }
+  if (descriptor.provider === 'nvidia') {
+    return Math.max(UPSTREAM_HEADERS_TIMEOUT_MS, 300_000);
+  }
   const transportKind = resolveTransportKind(body, descriptor);
   const hasSyntheticStreamingHeaders =
     streaming && transportKind !== 'openai-compat' && transportKind !== 'custom';

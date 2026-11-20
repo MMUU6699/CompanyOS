@@ -133,6 +133,12 @@ export async function findServableLastReadyImage(
       history: own ? [own, ...history] : history,
       identitySnapshotName: identity.snapshotName,
     });
+    if (
+      input.buildProvider === 'daytona' &&
+      !candidates.some((c) => c.snapshotName === 'kortix-sandbox-v1')
+    ) {
+      candidates.push({ snapshotName: 'kortix-sandbox-v1', contentHash: null });
+    }
     if (candidates.length === 0) return null;
     const activeName = await findFirstActiveSnapshot(
       provider,
@@ -211,7 +217,7 @@ export async function ensureSessionImage(
   ]).finally(() => clearTimeout(timer));
   if (first !== OVER_BUDGET) return first;
 
-  const provider = opts.provider ?? 'platinum';
+  const provider = opts.provider ?? config.getDefaultProvider();
   const fallback = await (opts.lastBooted ?? lastBootedImage)(project.projectId, opts.slug, provider).catch(() => null);
   const context = {
     projectId: project.projectId,

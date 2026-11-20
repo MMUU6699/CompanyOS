@@ -62,27 +62,11 @@ import { SubscriptionSwitcher, subscriptionProviderOf } from './subscription-swi
 // Re-export for consumers
 export { Tag };
 
-export function ConnectProviderDialog({
-  open,
-  onOpenChange,
-  providers: _providers,
-}: {
+export function ConnectProviderDialog(_props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   providers: ProviderListResponse | undefined;
 }) {
-  const { openProviderModal, closeProviderModal } = useProviderModalStore();
-
-  useEffect(() => {
-    if (open) openProviderModal('providers');
-    else closeProviderModal();
-  }, [open, openProviderModal, closeProviderModal]);
-
-  const isStoreOpen = useProviderModalStore((s) => s.isOpen);
-  useEffect(() => {
-    if (!isStoreOpen && open) onOpenChange(false);
-  }, [isStoreOpen, open, onOpenChange]);
-
   return null;
 }
 
@@ -435,7 +419,12 @@ export interface ModelSelectorProps {
   reasoning?: ModelReasoningControls;
 }
 
-export function ModelSelector({
+export function ModelSelector(_props: ModelSelectorProps) {
+  // Model and provider selection UI is disabled; backend locks inference to NVIDIA Gemma 4 31B.
+  return null;
+}
+
+function _LegacyModelSelector({
   models,
   selectedModel,
   onSelect,

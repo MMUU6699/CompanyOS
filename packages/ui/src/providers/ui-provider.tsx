@@ -348,7 +348,7 @@ export const defaultUiHostConfig: UiHostConfig = {
   commandPaletteShortcut: false,
   settingsShortcut: false,
   accountApiEnabled: true,
-  modelPickerEnabled: true,
+  modelPickerEnabled: false,
   contextMeterEnabled: true,
   sessionOverridesEnabled: true,
   runtimeSlashEnabled: true,

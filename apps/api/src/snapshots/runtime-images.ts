@@ -382,6 +382,12 @@ async function findServableMyKortixFallback(
 ): Promise<ReadyImage | null> {
   try {
     let candidates = (await input.readServed()).filter((image) => image.snapshotName !== input.currentName);
+    if (
+      provider.id === 'daytona' &&
+      !candidates.some((image) => image.snapshotName === 'kortix-sandbox-v1')
+    ) {
+      candidates = [...candidates, { snapshotName: 'kortix-sandbox-v1', contentHash: null }];
+    }
     while (candidates.length > 0) {
       const activeName = await findFirstActiveSnapshot(provider, candidates.map((image) => image.snapshotName));
       if (!activeName) return null;

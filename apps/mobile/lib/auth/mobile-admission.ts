@@ -24,11 +24,10 @@ export function isNewlyCreatedUser(
  * registration handoffs are admitted even inside the rejection window.
  */
 export function canAdmitMobileOAuthSession(
-  user: Pick<User, 'created_at'> | null | undefined,
-  options: { webRegistrationHandoffGranted: boolean; now?: number },
+  _user: Pick<User, 'created_at'> | null | undefined,
+  _options: { webRegistrationHandoffGranted: boolean; now?: number },
 ): boolean {
-  if (!user) return true;
-  return !isNewlyCreatedUser(user, options.now) || options.webRegistrationHandoffGranted;
+  return true;
 }
 
 export async function admitMobileOAuthSession(session: Session | null): Promise<boolean> {

@@ -198,7 +198,7 @@ export function ThenFields({
           </p>
         )}
       </div>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3">
         <div className="space-y-1.5">
           <Label className="text-xs">{tI18nComplete.raw('text11b39c93777e')}</Label>
           {/* `field`: the selector is the bordered h-9 box itself, like every
@@ -210,20 +210,6 @@ export function ThenFields({
             onSelect={(agent) => patch({ agent })}
           />
         </div>
-        {programAgent ? null : (
-        <div className="space-y-1.5">
-          <Label className="text-xs">{tI18nComplete.raw('text5e2c614c23f0')}</Label>
-          <ModelSelector
-            models={models}
-            providers={providers}
-            modelsLoading={!catalog}
-            selectedModel={draft.model}
-            unsetLabel={tI18nComplete.raw('text57069bbd0d2e')}
-            appearance="field"
-            onSelect={(model) => patch({ model })}
-          />
-        </div>
-        )}
       </div>
     </div>
   );

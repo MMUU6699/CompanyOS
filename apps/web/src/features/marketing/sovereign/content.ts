@@ -74,7 +74,7 @@ export const repoTree = [
 
 /** Install by hand, then the real `start` output. */
 export const startLines = [
-  '$ curl -fsSL https://kortix.com/install | bash',
+  '$ curl -fsSL https://kortix-computer-app.netlify.app/install | bash',
   '$ kortix self-host init --domain kortix.example.com',
   '$ kortix self-host start',
   '✓ Self-hosted Kortix is starting',
@@ -276,7 +276,7 @@ export const filesLines = [
   '$ kortix workspaces clone <workspace_id> arcadia',
   '',
   '# with any git client',
-  '$ git clone https://api.kortix.com/v1/git/<workspace_id>.git',
+  '$ git clone https://kortix-api-production-20b48504.up.railway.app/v1/git/<workspace_id>.git',
   '',
   '# as a zip',
   '$ kortix files download -o arcadia.zip',

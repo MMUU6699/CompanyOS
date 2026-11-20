@@ -419,7 +419,7 @@ export function ProjectSwitcherSheet({
       <WebHandoffSheet
         ref={handoffRef}
         title={t('workspace.createOnWebTitle', 'Create a workspace on the web')}
-        line={t('workspace.createOnWebLine', 'Workspaces are created on kortix.com.')}
+        line={t('workspace.createOnWebLine', 'Workspaces are created in the Kortix web app.')}
         run={create.runHandoff}
         onCancel={create.handleHandoffCancel}
       />

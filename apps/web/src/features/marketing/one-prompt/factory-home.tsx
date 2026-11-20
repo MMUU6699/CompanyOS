@@ -32,7 +32,7 @@ import { AgentTile, ApprovalArt, ComposerArt, ConnectArt, FindArt, ProveArt, Sig
 import { SessionReel } from './session-reel';
 
 /** The company site: this page is one product of it. */
-const KORTIX = 'https://kortix.com';
+const KORTIX = 'https://kortix-computer-app.netlify.app';
 
 /** The column every section sits in: the site grid, the same as the shared FAQ and footer. */
 const COLUMN = 'mx-auto w-full max-w-7xl px-6';

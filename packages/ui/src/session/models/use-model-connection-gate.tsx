@@ -68,6 +68,30 @@ export function resolveGateProjectId(
  * behaviour verbatim — see `resolveGateProjectId`.
  */
 export function useModelConnectionGate(
+  _models: FlatModel[] = [],
+  _options?: { projectId?: string | null },
+) {
+  const openConnectProvider = useCallback(
+    (_tab: ProviderModalTab = 'providers', _providerId?: string) => {},
+    [],
+  );
+  const openUpgrade = useCallback(() => {}, []);
+  const isSelectableModel = useCallback((_selectedModel: ModelKey) => true, []);
+
+  return {
+    canConnectProvider: false,
+    canWriteProviders: false,
+    openConnectProvider,
+    openUpgrade,
+    modal: null,
+    hasSelectableModels: true,
+    isSelectableModel,
+    entitlementsPending: false,
+    showUpgradeOption: false,
+  };
+}
+
+function _legacyUseModelConnectionGate(
   models: FlatModel[] = [],
   options?: { projectId?: string | null },
 ) {

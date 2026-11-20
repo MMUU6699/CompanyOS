@@ -539,6 +539,7 @@ export {
   type EmptyConversationInput,
   type SavedSessionCopy,
   isEmptyConversation,
+  readLocalSavedSessionLog,
   readSavedSessionCopy,
   savedCopyEmptyRoot,
 } from './core/session-sync/saved-transcript';

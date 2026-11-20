@@ -670,6 +670,13 @@ const envSchema = z.object({
   // the in-cluster gateway service, e.g. http://kortix-gateway:8090, so the
   // gateway stays internal and sandboxes reach it via the API's public origin.
   LLM_GATEWAY_PROXY_TARGET: optStr,
+  // ── OpenRouter 100% Free-Only Multi-Model Fallback Chain ────────────────
+  OPENROUTER_API_KEY: optStr,
+  OPENROUTER_BASE_URL: optUrl('https://openrouter.ai/api/v1'),
+  OPENROUTER_FREE_MODELS: optStr,
+  // ── Legacy NVIDIA NIM env vars (retained for backward compatibility) ────
+  NVIDIA_API_KEY: optStr,
+  NVIDIA_NIM_BASE_URL: optUrl('https://integrate.api.nvidia.com/v1'),
   OPENAI_API_KEY: optStr,
   // ── Billing — Stripe (optional, only for cloud billing) ──────────────────
   STRIPE_SECRET_KEY: optStr,
@@ -686,8 +693,8 @@ const envSchema = z.object({
   // would silently bypass per-project Dockerfiles and is explicitly
   // disallowed.
   DAYTONA_API_KEY: optStr,
-  DAYTONA_SERVER_URL: optStr,
-  DAYTONA_TARGET: optStr,
+  DAYTONA_SERVER_URL: optStrDefault('https://app.daytona.io/api'),
+  DAYTONA_TARGET: optStrDefault('eu'),
   // Org-level Daytona webhook signing secret (Svix `whsec_…`). When set, the
   // /v1/billing/webhooks/daytona endpoint closes compute billing the instant a
   // box stops; the reaper sweep is the backstop, so this is optional.
@@ -901,7 +908,7 @@ const envSchema = z.object({
   ARTIFACT_CONTENT_URL: optStr,
   // Comma-separated. The first entry is the default for new sessions.
   // Platinum is the reference; `daytona` is a legacy opt-in fallback.
-  ALLOWED_SANDBOX_PROVIDERS: optStrDefault('platinum'),
+  ALLOWED_SANDBOX_PROVIDERS: optStrDefault('daytona'),
 
   // ── Sandbox lifecycle (Daytona auto-stop / auto-archive / auto-delete) ────
   // Set as SDK create() params so a box self-manages even if the API/tunnel
@@ -1178,7 +1185,7 @@ export const KNOWN_PROVIDERS: readonly SandboxProviderName[] = ['platinum', 'day
  */
 export function parseAllowedProviders(
   raw: string,
-  fallback: SandboxProviderName[] = ['platinum'],
+  fallback: SandboxProviderName[] = ['daytona'],
 ): SandboxProviderName[] {
   if (!raw) return fallback;
   const names = raw
@@ -1408,11 +1415,11 @@ function validateEnv(): z.infer<typeof envSchema> {
   }
 
   // ── Warnings (non-fatal but worth knowing) ─────────────────────────────
-  if (raw.KORTIX_MANAGED_PROVIDER_ENABLED === 'true' && !raw.PLATINUM_INFERENCE_API_KEY) {
+  if (raw.KORTIX_MANAGED_PROVIDER_ENABLED === 'true' && !raw.OPENROUTER_API_KEY) {
     issues.push({
-      var: 'PLATINUM_INFERENCE_API_KEY',
+      var: 'OPENROUTER_API_KEY',
       message:
-        'Managed models are on but PLATINUM_INFERENCE_API_KEY is unset — Kortix managed models are unavailable',
+        'Managed models are on but OPENROUTER_API_KEY is unset — 100% free OpenRouter inference is unavailable',
       level: 'warn',
     });
   }
@@ -1649,6 +1656,11 @@ export const config = {
   LLM_GATEWAY_CATALOG_URL: env.LLM_GATEWAY_CATALOG_URL,
   LLM_GATEWAY_PROXY_PORT: env.LLM_GATEWAY_PROXY_PORT,
   LLM_GATEWAY_PROXY_TARGET: env.LLM_GATEWAY_PROXY_TARGET,
+  OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
+  OPENROUTER_BASE_URL: env.OPENROUTER_BASE_URL,
+  OPENROUTER_FREE_MODELS: env.OPENROUTER_FREE_MODELS,
+  NVIDIA_API_KEY: env.NVIDIA_API_KEY,
+  NVIDIA_NIM_BASE_URL: env.NVIDIA_NIM_BASE_URL,
   OPENAI_API_KEY: env.OPENAI_API_KEY,
   // ─── Stripe (Billing) ─────────────────────────────────────────────────────
   STRIPE_SECRET_KEY: env.STRIPE_SECRET_KEY,
@@ -1903,7 +1915,7 @@ export const config = {
    * that explicitly choose a provider bypass that preference.
    */
   getDefaultProvider(): SandboxProviderName {
-    return this.ALLOWED_SANDBOX_PROVIDERS[0] ?? 'platinum';
+    return this.ALLOWED_SANDBOX_PROVIDERS[0] ?? 'daytona';
   },
 
   isPlatinumEnabled(): boolean {

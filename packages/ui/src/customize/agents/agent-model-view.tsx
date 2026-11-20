@@ -189,84 +189,11 @@ export function AgentModelView({
 
 function ModelView({ oc, setOc, footer }: { oc: RuntimeAgentConfig; setOc: SetRuntime; footer?: ReactNode }) {
   const t = useI18nTranslations('agentEditor.modelView');
-  const tTabs = useI18nTranslations('agentEditor.tabs');
-  const { data: providers } = useRuntimeProviders();
-  const models = flattenModels(providers, { providerMode: modelProviderMode(providers) });
-  const pinned = oc.model ? modelRefToKey(oc.model) : null;
-  const pinnedModel = pinned
-    ? models.find((m) => m.providerID === pinned.providerID && m.modelID === pinned.modelID)
-    : undefined;
-  // The pinned model's published variants: the composer's thinking-effort choices.
-  const variants = pinnedModel?.variants ? Object.keys(pinnedModel.variants) : [];
 
   return (
     <EditorSectionStyleProvider value="panel">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
-        <EditorSection title={t('title')} lead>
-          <SettingRow
-            label={pinned ? (pinnedModel?.modelName ?? pinned.modelID) : t('projectDefault')}
-            help={
-              pinned ? (
-                <>
-                  {t('pinned')} ·{' '}
-                  <button
-                    type="button"
-                    onClick={() => setOc('model', undefined)}
-                    className="text-foreground decoration-border hover:decoration-foreground underline underline-offset-4 transition-colors"
-                  >
-                    {t('followDefault')}
-                  </button>
-                </>
-              ) : (
-                t('followsDefault')
-              )
-            }
-          >
-            <div className="flex sm:justify-end">
-              <ModelSelector
-                models={models}
-                providers={providers}
-                selectedModel={pinned}
-                unsetLabel={t('pinModel')}
-                triggerVariant="secondary"
-                onSelect={(m) => setOc('model', m ? modelKeyToWire(m) : undefined)}
-              />
-            </div>
-          </SettingRow>
-          <SettingRow
-            label={t('thinkingEffort')}
-            help={variants.length > 0 ? (oc.variant ? t('effortSetHelp') : t('effortAutoHelp')) : t('effortNoVariantsHelp')}
-          >
-            {variants.length > 0 ? (
-              <Select
-                value={oc.variant && variants.includes(oc.variant) ? oc.variant : AUTO}
-                onValueChange={(v) => setOc('variant', v === AUTO ? undefined : v)}
-              >
-                <SelectTrigger aria-label={t('thinkingEffort')} size="sm" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={AUTO}>{t('auto')}</SelectItem>
-                  {variants.map((v) => (
-                    <SelectItem key={v} value={v} className="capitalize">
-                      {v}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <Input
-                aria-label={t('thinkingEffort')}
-                value={oc.variant ?? ''}
-                placeholder={t('auto')}
-                className="h-8"
-                onChange={(e) => setOc('variant', e.target.value || undefined)}
-              />
-            )}
-          </SettingRow>
-        </EditorSection>
-
-        <EditorSection title={t('samplingTitle')}>
+        <EditorSection title={t('samplingTitle')} lead>
           <SliderField
             label={t('temperature')}
             help={`${t('temperatureMin')} · ${t('temperatureMax')}`}
@@ -303,10 +230,6 @@ function ModelView({ oc, setOc, footer }: { oc: RuntimeAgentConfig; setOc: SetRu
               </span>
             </div>
           </SettingRow>
-        </EditorSection>
-
-        <EditorSection title={tTabs('providerOptions')}>
-          <ProviderOptions value={oc.options} onChange={(next) => setOc('options', next)} />
         </EditorSection>
         {footer}
       </div>

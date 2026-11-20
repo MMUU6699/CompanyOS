@@ -12,15 +12,21 @@
  * No project flag is read, and no v1 transcript (`GET …/transcript`).
  */
 import { useEffect, useMemo, useState } from 'react';
-import { readSavedSessionCopy, sessionLogOfV1Rows, type SavedSessionCopy, type SessionLogThread } from '@kortix/sdk';
+import {
+  readLocalSavedSessionLog,
+  readSavedSessionCopy,
+  sessionLogOfV1Rows,
+  type SavedSessionCopy,
+  type SessionLogThread,
+} from '@kortix/sdk';
 import { useSessionLogRecord, useSessionLogThread, useSessionStateStore, useSessionSync } from '@kortix/sdk/react';
 
 export interface SavedCopyTarget {
   projectId: string;
   /** The Kortix session id. */
   sessionId: string;
-  /** The runtime session the copy belongs to: the root, or a sub-agent's. */
-  rootId: string;
+  /** The runtime session the copy belongs to: the root (nullable while loading), or a sub-agent's. */
+  rootId: string | null;
   child: boolean;
 }
 
@@ -29,12 +35,19 @@ export function useSavedCopy(target: SavedCopyTarget | null): {
   thread: SessionLogThread | undefined;
   empty: boolean;
 } {
-  const key = target ? `${target.projectId}/${target.sessionId}/${target.rootId}/${target.child ? 'child' : 'root'}` : null;
+  const key = target
+    ? `${target.projectId}/${target.sessionId}/${target.child ? target.rootId ?? '' : 'root'}`
+    : null;
   const [read, setRead] = useState<({ key: string } & SavedSessionCopy) | null>(null);
   useEffect(() => {
     // A sub-agent: `useSessionSync` below reads the log.
     if (!target || !key || target.child) return;
     let current = true;
+    // Paint any locally cached v2 page immediately (<10 ms) before network `GET …/log` lands.
+    void readLocalSavedSessionLog(target.projectId, target.sessionId).then((cached) => {
+      if (!current || !cached) return;
+      useSessionStateStore.getState().applySessionLogPage(target.sessionId, cached);
+    });
     void readSavedSessionCopy({
       projectId: target.projectId,
       sessionId: target.sessionId,
@@ -48,7 +61,7 @@ export function useSavedCopy(target: SavedCopyTarget | null): {
     return () => {
       current = false;
     };
-    // `key` names every field of `target` this effect reads.
+    // `key` names every stable field needed to fetch the root log page.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   const mine = read && read.key === key ? read : null;
@@ -67,9 +80,9 @@ export function useSavedCopy(target: SavedCopyTarget | null): {
     sessionLog: !target?.child && (!mine || !!mine.log),
   });
 
-  const rows = target && sync.messages.length > 0 ? sync.messages : null;
+  const rows = target && target.rootId && sync.messages.length > 0 ? sync.messages : null;
   const v1Thread = useMemo(
-    () => (target && rows ? sessionLogOfV1Rows(target.sessionId, target.rootId, rows).threads[0] : undefined),
+    () => (target && target.rootId && rows ? sessionLogOfV1Rows(target.sessionId, target.rootId, rows).threads[0] : undefined),
     [target, rows],
   );
   const source = useMemo(

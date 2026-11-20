@@ -45,7 +45,7 @@ export const steps: readonly Step[] = [
     label: 'Install the CLI',
     title: 'Terminal: your server',
     lines: [
-      '$ curl -fsSL https://kortix.com/install | bash',
+      '$ curl -fsSL https://kortix-computer-app.netlify.app/install | bash',
       '▸  Resolving latest release from GitHub…',
       '✓  Latest release: <version>',
       '✓  Checksum verified (<sha256>)',
