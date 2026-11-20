@@ -112,7 +112,7 @@ RUN printf '{"name":"kortix-cli-build","private":true,"workspaces":["apps/cli","
 # `@anthropic-ai/claude-agent-sdk`); tests/unit/claude-code-pin.test.ts keeps
 # the two equal. The package matches the image's architecture: staging and
 # prod build arm64, and an x64 binary there fails with "Exec format error".
-FROM node:22-slim AS claude-code
+FROM node:26-slim AS claude-code
 ARG CLAUDE_AGENT_SDK_VERSION=0.3.316
 ARG TARGETARCH
 WORKDIR /tmp/claude
@@ -129,7 +129,7 @@ RUN case "${TARGETARCH:-amd64}" in \
 
 # ---- Deps Stage ----
 # Install with pnpm (matches lockfile), run with bun
-FROM node:22-slim AS deps
+FROM node:26-slim AS deps
 
 WORKDIR /app
 
