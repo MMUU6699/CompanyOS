@@ -13,7 +13,7 @@ import {
   ISOLATED_SLIDE_IFRAME_SANDBOX,
   SLIDE_IFRAME_SANDBOX,
 } from '../../internal/lib/security/iframe-sandbox';
-import { privilegedFrameOrigins } from '../../internal/lib/security/privileged-frame-origins';
+import { privilegedFrameOrigins, webAppFrameOrigins } from '../../internal/lib/security/privileged-frame-origins';
 import { SANDBOX_PORTS } from '@kortix/sdk';
 
 // ---------------------------------------------------------------------------
@@ -176,8 +176,15 @@ export function getLanguageFromExt(filename: string): string {
  *   origin on a per-sandbox preview host, where the app needs its own cookies
  *   and storage; opaque on a privileged origin.
  * - `slide` — a deck slide: scripts and modals only. Same origin rule as `app`.
+ * - `desktop` — Kortix's first-party desktop streamer (`voxl` on port `6901`):
+ *   requires its own origin for its WebCodecs `Worker` and cookie-authenticated
+ *   WebSocket. Keeps its origin on a preview host or a cross-origin API path
+ *   proxy (`/v1/p/<sandbox>/6901/…`), and stays opaque if served from the web
+ *   app's own origin.
  */
-export type FrameContent = 'document' | 'app' | 'slide';
+export type FrameContent = 'document' | 'app' | 'slide' | 'desktop';
+
+const DESKTOP_PATH_PROXY = /^\/v1\/p\/[^/]+\/6901(?:\/|$)/;
 
 export interface FramePolicy {
   /** The iframe `sandbox` attribute. */
@@ -198,9 +205,14 @@ export interface FramePolicy {
 export function framePolicy(
   content: FrameContent,
   src: string,
-  privilegedOrigins: readonly string[] = privilegedFrameOrigins(),
+  privilegedOrigins?: readonly string[],
 ): FramePolicy {
-  const own = content !== 'document' && !isOnPrivilegedOrigin(src, privilegedOrigins);
+  const privileged = privilegedOrigins ?? privilegedFrameOrigins();
+  const webOrigins = privilegedOrigins ? privilegedOrigins.slice(0, 1) : webAppFrameOrigins();
+  const own =
+    content === 'desktop'
+      ? isAllowedDesktopOrigin(src, privileged, webOrigins)
+      : content !== 'document' && !isOnPrivilegedOrigin(src, privileged);
   if (content === 'slide') {
     return own
       ? { sandbox: SLIDE_IFRAME_SANDBOX, origin: 'own' }
@@ -240,4 +252,29 @@ function isOnPrivilegedOrigin(src: string, privilegedOrigins: readonly string[])
   const frameOrigin = originOf(src, privileged[0]);
   if (!frameOrigin) return true;
   return privileged.includes(frameOrigin);
+}
+
+/**
+ * First-party desktop (`voxl` on port 6901): keep `own` origin on a preview host
+ * or a cross-origin API path proxy (`/v1/p/<sandbox>/6901/…`), never on the web
+ * app's own origin.
+ */
+function isAllowedDesktopOrigin(
+  src: string,
+  privilegedOrigins: readonly string[],
+  webOrigins: readonly string[],
+): boolean {
+  if (!isOnPrivilegedOrigin(src, privilegedOrigins)) return true;
+  const web = webOrigins
+    .map((origin) => originOf(origin))
+    .filter((origin): origin is string => origin !== null);
+  let parsed: URL;
+  try {
+    parsed = new URL(src, web[0]);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (!DESKTOP_PATH_PROXY.test(parsed.pathname)) return false;
+  return !web.includes(parsed.origin);
 }

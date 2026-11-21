@@ -225,6 +225,70 @@ import type {
 const STATUS_CACHE_TTL_MS = 1500;
 const runningStatusCache = new Map<string, number>(); // externalId → cachedAt (ms)
 
+const DESKTOP_REPAIR_COOLDOWN_MS = 60_000;
+const DESKTOP_REPAIR_TIMEOUT_MS = 15_000;
+const desktopRepairCooldown = new Map<string, number>();
+const desktopRepairInflight = new Map<string, Promise<boolean>>();
+
+/**
+ * Self-heal stale `/tmp/.X1-lock` on resumed Daytona sandboxes.
+ *
+ * Daytona preserves `/tmp` across stop→start while processes do not survive.
+ * Images built before the `entrypoint.sh` lock cleanup leave `/tmp/.X1-lock`
+ * behind on resume, so `Xvfb :1` exits with "Server is already active for
+ * display 1" and `voxl` loops forever unable to bind port 6901.
+ *
+ * Single-flight and 60s cooldown gated per sandbox so concurrent desktop
+ * probes trigger at most one fast repair command.
+ */
+export function repairDaytonaDesktopIfStale(externalId: string): Promise<boolean> {
+  const inflight = desktopRepairInflight.get(externalId);
+  if (inflight) return inflight;
+  const lastAt = desktopRepairCooldown.get(externalId);
+  if (lastAt !== undefined && Date.now() - lastAt < DESKTOP_REPAIR_COOLDOWN_MS) {
+    return Promise.resolve(false);
+  }
+  desktopRepairCooldown.set(externalId, Date.now());
+  const task = (async () => {
+    try {
+      const daytona = getDaytona();
+      const sandbox = await withTimeout(
+        daytona.get(externalId),
+        DESKTOP_REPAIR_TIMEOUT_MS,
+        `Daytona get(${externalId}) for desktop repair`,
+      );
+      if (classifyDaytonaState(sandbox.state) !== 'running') return false;
+      const cmd =
+        'bash -lc \'if command -v voxl >/dev/null 2>&1 && ! curl -fs -o /dev/null http://127.0.0.1:6901/; then ' +
+        'if ! pgrep -x Xvfb >/dev/null 2>&1; then ' +
+        'kortix-desktop stop >/dev/null 2>&1 || true; ' +
+        'rm -f /tmp/.X1-lock /tmp/.X11-unix/X1; ' +
+        'KORTIX_DESKTOP_SESSION_DELAY_S=0 kortix-desktop start >/dev/null 2>&1 || true; ' +
+        'echo repaired; fi; fi\'';
+      const result = await withTimeout(
+        sandbox.process.executeCommand(cmd, undefined, undefined, 12),
+        DESKTOP_REPAIR_TIMEOUT_MS,
+        `Daytona desktop repair(${externalId})`,
+      );
+      const repaired = Boolean(result.result?.includes('repaired'));
+      if (repaired) {
+        console.log(`[DAYTONA] repaired stale X11 lock and restarted desktop on ${externalId}`);
+      }
+      return repaired;
+    } catch (err) {
+      console.warn(
+        `[DAYTONA] desktop self-heal failed for ${externalId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return false;
+    } finally {
+      desktopRepairInflight.delete(externalId);
+    }
+  })();
+  desktopRepairInflight.set(externalId, task);
+  return task;
+}
+
 /**
  * Daytona sandbox lifecycle policy, applied as SDK create() params so a box
  * self-manages even when the API/tunnel that created it dies — orphaned
@@ -445,6 +509,11 @@ export class DaytonaProvider implements SandboxProvider {
         `Daytona start(${externalId})`,
       );
     await runWithDaytonaQuotaRetry(`resume:${externalId}`, externalId, runStart);
+    // Daytona preserves /tmp/.X1-lock across stop→start, which kills Xvfb :1
+    // on existing images; heal asynchronously right after resume so Desktop
+    // (:6901) is up immediately without delaying the wake response.
+    desktopRepairCooldown.delete(externalId);
+    void repairDaytonaDesktopIfStale(externalId);
   }
 
   async renewLifecycle(externalId: string): Promise<void> {

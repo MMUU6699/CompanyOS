@@ -286,6 +286,12 @@ describe('extractPreviewToken', () => {
       { Cookie: '__preview_session=tok%2Dcookie' },
       'tok-cookie',
     ],
+    [
+      'the CHIPS partitioned cookie beats the unpartitioned preview cookie',
+      'http://p3000-sbx.localhost:8008/x',
+      { Cookie: '__preview_session=tok-unpart; __preview_session_chips=tok-chips' },
+      'tok-chips',
+    ],
   ])('%s', (_label, href, headers, token) => {
     const url = new URL(href);
     expect(extractPreviewToken(new Request(url, { headers }), url)).toBe(token);

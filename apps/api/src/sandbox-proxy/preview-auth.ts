@@ -38,6 +38,7 @@ import { bindAuditPrincipal } from '../shared/audit-scope';
 import { previewActorFields } from './preview-audit';
 import type { PreviewPrincipalKind } from './preview-session';
 import { bearerToken } from '../shared/bearer-token';
+import { readPreviewSessionCookie } from '../middleware/auth-scope';
 
 async function sandboxBelongsToProject(sandboxId: string, projectId: string): Promise<boolean> {
   const sandboxProjectId = await resolveSandboxProjectId(sandboxId);
@@ -184,7 +185,7 @@ export async function authenticatePreviewPrincipalDetailed(
 
 /**
  * Extract the candidate token from a preview request, in priority order:
- * Authorization: Bearer → X-Kortix-Token → ?token= → __preview_session cookie.
+ * Authorization: Bearer → X-Kortix-Token → ?token= → __preview_session_chips / __preview_session cookie.
  * Mirrors the order used by `combinedAuth` for preview routes.
  */
 export function extractPreviewToken(req: Request, url: URL): string | null {
@@ -195,14 +196,5 @@ export function extractPreviewToken(req: Request, url: URL): string | null {
   if (ktHeader) return ktHeader;
   const qp = url.searchParams.get('token');
   if (qp) return qp;
-  const cookieHeader = req.headers.get('Cookie') || '';
-  const m = cookieHeader.match(/(?:^|;\s*)__preview_session=([^;]+)/);
-  if (m) {
-    try {
-      return decodeURIComponent(m[1]);
-    } catch (err) {
-      if (!(err instanceof URIError)) throw err;
-    }
-  }
-  return null;
+  return readPreviewSessionCookie(req.headers.get('Cookie'));
 }

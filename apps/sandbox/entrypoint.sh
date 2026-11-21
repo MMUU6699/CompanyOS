@@ -51,6 +51,13 @@ desktop() {
       mkdir -p -m 700 "${XDG_RUNTIME_DIR}"
       rm -f "${XDG_RUNTIME_DIR}/bus"
       dbus-daemon --session --address="${DBUS_SESSION_BUS_ADDRESS}" --fork --nopidfile
+      # Clean stale X11 lock/socket left behind across container stop/resume
+      # (Daytona preserves /tmp across stop->start while processes do not survive).
+      local disp_num="${DISPLAY#:}"
+      disp_num="${disp_num%%.*}"
+      if ! xset q >/dev/null 2>&1; then
+        rm -f "/tmp/.X${disp_num}-lock" "/tmp/.X11-unix/X${disp_num}"
+      fi
       # The start size is the most voxl can grow to; it shrinks the desktop to
       # each viewer's window (--enable-resize).
       Xvfb "${DISPLAY}" -screen 0 2560x1600x24 -shmem -nolisten tcp &
@@ -66,8 +73,14 @@ desktop() {
         && pactl load-module module-null-sink sink_name=output >/dev/null \
         && pactl set-default-sink output || true
       startxfce4 &
-      # ponytail: voxl restarts on exit; Xvfb or XFCE dying needs `kortix-desktop stop && kortix-desktop start`.
       while :; do
+        if ! xset q >/dev/null 2>&1; then
+          rm -f "/tmp/.X${disp_num}-lock" "/tmp/.X11-unix/X${disp_num}"
+          Xvfb "${DISPLAY}" -screen 0 2560x1600x24 -shmem -nolisten tcp &
+          for _ in $(seq 1 50); do xset q >/dev/null 2>&1 && break; sleep 0.1; done
+          xset s off -dpms s noblank || true
+          startxfce4 &
+        fi
         # The Kortix proxy authenticates every viewer, so voxl's own login is
         # off. Its Host and Origin checks stay on: the box's browser loads any
         # site, and a page there reaches this port on loopback. The edges

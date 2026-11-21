@@ -108,22 +108,28 @@ export async function withTokenAttemptBudget<T>(
 }
 
 /** The first `kortix_` credential a request presents, in resolver order. */
-export function presentedKortixToken(c: Context, cookieName?: string): string | null {
+export function presentedKortixToken(
+  c: Context,
+  cookieName?: string | readonly string[],
+): string | null {
   const authorization = c.req.header('Authorization');
   const bearer = bearerToken(authorization);
   if (bearer?.startsWith('kortix_')) return bearer;
   const header = c.req.header('X-Kortix-Token');
   if (header?.startsWith('kortix_')) return header;
   if (cookieName) {
+    const names = typeof cookieName === 'string' ? [cookieName] : cookieName;
     const cookies = c.req.header('Cookie') ?? '';
-    for (const part of cookies.split(';')) {
-      const [name, ...rest] = part.trim().split('=');
-      if (name !== cookieName) continue;
-      try {
-        const value = decodeURIComponent(rest.join('='));
-        if (value.startsWith('kortix_')) return value;
-      } catch {
-        return null;
+    for (const targetName of names) {
+      for (const part of cookies.split(';')) {
+        const [name, ...rest] = part.trim().split('=');
+        if (name !== targetName) continue;
+        try {
+          const value = decodeURIComponent(rest.join('='));
+          if (value.startsWith('kortix_')) return value;
+        } catch {
+          break;
+        }
       }
     }
   }

@@ -9,10 +9,16 @@ import { uiHostEnv } from '../../../lib/host-env';
  * `backendUrl` may be root-relative (`/v1` on a self-host), which puts the
  * API on the page origin; resolving it against the page covers that case.
  */
-export function privilegedFrameOrigins(): string[] {
+/** The web-app origins (current page and configured app URL) that no sandbox frame may share. */
+export function webAppFrameOrigins(): string[] {
   const { appUrl } = uiHostEnv();
   const page = typeof window !== 'undefined' ? window.location.origin : appUrl;
-  const origins = [page, appUrl];
+  return [page, appUrl];
+}
+
+export function privilegedFrameOrigins(): string[] {
+  const origins = webAppFrameOrigins();
+  const page = origins[0];
   try {
     origins.push(new URL(platformConfig().backendUrl, page).origin);
   } catch {

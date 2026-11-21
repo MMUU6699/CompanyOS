@@ -33,6 +33,7 @@ describe('createCorsMiddleware', () => {
     expect(response.status).toBe(204);
     expect(response.headers.get('access-control-allow-origin')).toBe('https://kortix.com');
     expect(response.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(response.headers.get('access-control-allow-methods')).toContain('HEAD');
     expect(response.headers.get('access-control-allow-headers')?.toLowerCase()).toContain(
       'last-event-id',
     );

@@ -17,7 +17,7 @@
  */
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-const COOKIE = /(?:^|;\s*)__preview_session=/;
+const COOKIE = /(?:^|;\s*)__preview_session(?:_chips)?=/;
 
 export function isCookieCsrfRefused(req: { method: string; headers: Headers }): boolean {
   if (SAFE_METHODS.has(req.method.toUpperCase())) return false;

@@ -69,7 +69,7 @@ export function createCorsMiddleware(options: CorsMiddlewareOptions) {
       if (allowPreviewOrigins && PREVIEW_ORIGIN.test(origin)) return origin;
       return null;
     },
-    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowMethods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowHeaders: [
       'Content-Type',
       'Authorization',

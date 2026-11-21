@@ -25,6 +25,10 @@ const PRIVILEGED = [APP, API];
 
 const PREVIEW_HOST = 'https://3211--sbx1.preview.example.com/report.html';
 const PATH_PROXY = 'https://api.example.com/v1/p/sbx1/3211/report.html';
+const DESKTOP_PREVIEW_HOST = 'https://prod-p6901-sbx1.p.example.com/';
+const DESKTOP_PATH_PROXY = 'https://api.example.com/v1/p/sbx1/6901/';
+const DESKTOP_APP_ORIGIN = `${APP}/v1/p/sbx1/6901/`;
+const DESKTOP_RELATIVE = '/v1/p/sbx1/6901/';
 const APP_ORIGIN = `${APP}/share/x.html`;
 const RELATIVE = '/v1/p/sbx1/3211/report.html';
 const BLOB = 'blob:https://app.example.com/5b1c-0000';
@@ -58,6 +62,15 @@ const FRAME_TABLE: [FrameContent, string, FramePolicy['origin'], string[]][] = [
   ['slide', PREVIEW_HOST, 'own', SLIDE_OWN],
   ['slide', PATH_PROXY, 'opaque', SLIDE_OPAQUE],
   ['slide', UNPARSEABLE, 'opaque', SLIDE_OPAQUE],
+  // First-party desktop (voxl on port 6901): keeps own origin on a preview host
+  // or a cross-origin API path proxy, stays opaque on the web app's own origin.
+  ['desktop', DESKTOP_PREVIEW_HOST, 'own', APP_OWN],
+  ['desktop', DESKTOP_PATH_PROXY, 'own', APP_OWN],
+  ['desktop', PATH_PROXY, 'opaque', DOCUMENT],
+  ['desktop', DESKTOP_APP_ORIGIN, 'opaque', DOCUMENT],
+  ['desktop', DESKTOP_RELATIVE, 'opaque', DOCUMENT],
+  ['desktop', BLOB, 'opaque', DOCUMENT],
+  ['desktop', UNPARSEABLE, 'opaque', DOCUMENT],
 ];
 
 describe('framePolicy', () => {

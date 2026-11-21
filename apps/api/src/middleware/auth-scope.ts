@@ -12,22 +12,88 @@ import {
 } from './workspace-binding';
 import { markCredentialFenceDenial } from '../shared/dead-credential-log';
 
-const PREVIEW_SESSION_COOKIE = '__preview_session';
+export const PREVIEW_SESSION_COOKIE = '__preview_session';
+export const PREVIEW_SESSION_COOKIE_PARTITIONED = '__preview_session_chips';
+const DEFAULT_PREVIEW_COOKIE_MAX_AGE = 3600;
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
+/** True when the client reached this endpoint over HTTPS (directly or behind a TLS LB). */
+export function isSecurePreviewRequest(req: {
+  url: string;
+  header?: (name: string) => string | undefined;
+  headers?: Headers;
+}): boolean {
+  const forwardedProto = (
+    req.header?.('x-forwarded-proto') ?? req.headers?.get('x-forwarded-proto') ?? ''
+  )
+    .split(',')[0]
+    ?.trim()
+    .toLowerCase();
+  if (forwardedProto) return forwardedProto === 'https';
+  try {
+    return new URL(req.url).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Set (or refresh) the preview session cookie.
- * Scoped to /v1/p/ so it only applies to preview proxy routes.
- * SameSite=Lax allows the cookie on same-site navigations and sub-resource loads.
+ * Build the Set-Cookie header values for `/v1/p/` path-based previews.
+ *
+ * Over HTTPS, emits BOTH an unpartitioned `SameSite=None; Secure` cookie (for
+ * top-level tabs / "Open in new tab") and a CHIPS `Partitioned` copy (for
+ * cross-site iframes & fetch probes such as Netlify web → Railway API under
+ * Chrome's third-party cookie restrictions). Over plain HTTP (`localhost`),
+ * falls back to `SameSite=Lax` without `Secure` because browsers drop
+ * `SameSite=None` cookies lacking `Secure`.
+ */
+export function previewPathSessionCookies(
+  token: string,
+  opts: { secure: boolean; maxAgeSeconds?: number },
+): string[] {
+  const encoded = encodeURIComponent(token);
+  const maxAge = opts.maxAgeSeconds ?? DEFAULT_PREVIEW_COOKIE_MAX_AGE;
+  const base = `Path=/v1/p/; HttpOnly; Max-Age=${maxAge}`;
+  if (!opts.secure) {
+    return [`${PREVIEW_SESSION_COOKIE}=${encoded}; ${base}; SameSite=Lax`];
+  }
+  return [
+    `${PREVIEW_SESSION_COOKIE}=${encoded}; ${base}; Secure; SameSite=None`,
+    `${PREVIEW_SESSION_COOKIE_PARTITIONED}=${encoded}; ${base}; Secure; SameSite=None; Partitioned`,
+  ];
+}
+
+/** Read the preview session token from a Cookie header (CHIPS copy first, then unpartitioned). */
+export function readPreviewSessionCookie(cookieHeader: string | null | undefined): string | null {
+  if (!cookieHeader) return null;
+  for (const name of [PREVIEW_SESSION_COOKIE_PARTITIONED, PREVIEW_SESSION_COOKIE]) {
+    const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+    if (!match?.[1]) continue;
+    try {
+      return decodeURIComponent(match[1]);
+    } catch (err) {
+      if (!(err instanceof URIError)) throw err;
+    }
+  }
+  return null;
+}
+
+/**
+ * Set (or refresh) the preview session cookie(s) scoped to `/v1/p/`.
  * Max-Age=3600 (1 hour) — the frontend refreshes the token periodically.
  */
-export function setPreviewSessionCookie(c: Context, token: string) {
-  const encoded = encodeURIComponent(token);
-  c.header(
-    'Set-Cookie',
-    `${PREVIEW_SESSION_COOKIE}=${encoded}; Path=/v1/p/; HttpOnly; Secure; SameSite=Lax; Max-Age=3600`,
-    { append: true },
-  );
+export function setPreviewSessionCookie(
+  c: Context,
+  token: string,
+  maxAgeSeconds = DEFAULT_PREVIEW_COOKIE_MAX_AGE,
+) {
+  const cookies = previewPathSessionCookies(token, {
+    secure: isSecurePreviewRequest(c.req),
+    maxAgeSeconds,
+  });
+  for (const cookie of cookies) {
+    c.header('Set-Cookie', cookie, { append: true });
+  }
 }
 
 export function extractPreviewSandboxId(path: string): string | null {

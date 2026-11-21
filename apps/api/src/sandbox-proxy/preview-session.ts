@@ -206,6 +206,7 @@ export function appCookieHeader(cookieHeader: string | null | undefined): string
         // Never forwarded even though it cannot reach a preview origin: a
         // self-host that puts previews on the API host must not leak it either.
         && name !== '__preview_session'
+        && name !== '__preview_session_chips'
       );
     });
   return kept.length ? kept.join('; ') : null;

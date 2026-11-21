@@ -107,7 +107,12 @@ export function clientResponseHeaders(upstreamHeaders: Headers, origin: string):
     headers.delete('set-cookie');
     for (const cookie of setCookies) {
       const name = cookie.split('=', 1)[0]?.trim();
-      if (name === '__kortix_preview' || name === '__kortix_preview_chips') continue;
+      if (
+        name === '__kortix_preview'
+        || name === '__kortix_preview_chips'
+        || name === '__preview_session'
+        || name === '__preview_session_chips'
+      ) continue;
       headers.append(
         'set-cookie',
         cookie

@@ -44,6 +44,7 @@ import {
   sendUpstreamAttempt,
 } from './upstream';
 import { isDaemonRuntimeNotReady } from './wake';
+import { SESSION_DESKTOP_PORT } from './upstream-origin';
 import { countProxyResponseBytes, proxyByteClass } from '../proxy-bytes';
 
 // The retry loop around the upstream hop: per-attempt budget, auto-wake of a
@@ -499,6 +500,24 @@ async function handleUpstreamFailureStatus(
         .then(({ repairDeadDaemonOnEdgeRefusal }) => repairDeadDaemonOnEdgeRefusal(req.record.sandboxId))
         .catch((err) =>
           logger.warn('[PREVIEW] dead-daemon repair request failed', {
+            sandboxId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+    }
+    // Daytona preserves `/tmp/.X1-lock` across stop→start, leaving Xvfb :1 dead
+    // and port 6901 returning 502 on existing images. Kick off a single-flight
+    // self-heal on the first 502 so the retry loop below picks up voxl live.
+    if (
+      upstream.status === 502 &&
+      upstreamPort === SESSION_DESKTOP_PORT &&
+      record.provider === 'daytona' &&
+      attempt === 0
+    ) {
+      void import('../../platform/providers/daytona')
+        .then(({ repairDaytonaDesktopIfStale }) => repairDaytonaDesktopIfStale(sandboxId))
+        .catch((err) =>
+          logger.warn('[PREVIEW] daytona desktop repair failed', {
             sandboxId,
             error: err instanceof Error ? err.message : String(err),
           }),

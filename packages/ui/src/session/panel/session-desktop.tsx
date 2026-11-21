@@ -200,7 +200,7 @@ export function SessionDesktop({
                 src={src}
                 title={t('title')}
                 className={cn('h-full w-full border-0', !live && 'invisible')}
-                sandbox={framePolicy('app', src).sandbox}
+                sandbox={framePolicy('desktop', src).sandbox}
                 allow="clipboard-read; clipboard-write; autoplay; fullscreen"
                 tabIndex={control ? 0 : -1}
               />

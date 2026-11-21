@@ -15,8 +15,8 @@ import { isKortixToken } from '../../shared/crypto';
 import { getSupabase } from '../../shared/supabase';
 import { makeOpenApiApp, json, auth, ErrorSchema } from '../../openapi';
 import { bearerToken } from '../../shared/bearer-token';
+import { setPreviewSessionCookie } from '../../middleware/auth-scope';
 
-const PREVIEW_SESSION_COOKIE = '__preview_session';
 const COOKIE_MAX_AGE = 3600; // 1 hour
 
 const getAuthToken = makeOpenApiApp();
@@ -65,20 +65,11 @@ getAuthToken.openapi(
       }
     }
 
-    // Set session cookie — host-only (no Domain= attribute) so the browser
-    // scopes it to the exact subdomain that served the response. This avoids
-    // Chrome rejecting the cookie when Domain=localhost is treated as a public suffix.
-    //
-    // IMPORTANT: Path MUST be /v1/p/ — matching the combinedAuth middleware cookie
-    // path. Using Path=/ would create a SECOND cookie at a different scope, causing
-    // both to be sent on /v1/p/* requests and doubling the Cookie header size,
-    // which leads to HTTP 431 (Request Header Fields Too Large).
-    const encoded = encodeURIComponent(token);
-    c.header(
-      'Set-Cookie',
-      `${PREVIEW_SESSION_COOKIE}=${encoded}; Path=/v1/p/; HttpOnly; Secure; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}`,
-      { append: true },
-    );
+    // Set session cookie(s) — host-only (no Domain= attribute) scoped to /v1/p/.
+    // Over HTTPS this emits both __preview_session (SameSite=None; Secure) and
+    // __preview_session_chips (SameSite=None; Secure; Partitioned) so cross-site
+    // iframes/probes (e.g. Netlify web → Railway API) and new-tab loads both work.
+    setPreviewSessionCookie(c, token, COOKIE_MAX_AGE);
 
     return c.json({ ok: true }, 200);
   },

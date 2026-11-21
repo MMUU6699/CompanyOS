@@ -13,6 +13,7 @@ const KORTIX_COOKIE_NAMES = new Set([
   appAccessCookieName(false),
   appAccessCookieName(true),
   '__preview_session',
+  '__preview_session_chips',
 ]);
 
 /** The `Cookie` header without Kortix cookies; null when nothing is left. */

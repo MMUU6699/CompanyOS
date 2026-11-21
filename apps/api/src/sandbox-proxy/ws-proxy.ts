@@ -21,6 +21,9 @@ import { bindPreviewResource, bindPreviewSession } from './preview-audit';
 import { resolvePreviewWsUpstream } from './forward';
 import { invalidatePreviewLink, resolveSandboxIngress } from './backend';
 import { establishPreviewSession, resolvePreviewRequest, sessionFromCookies } from './preview-origin';
+import { isAllowedPreviewOrigin } from './preview-hosts';
+import { readPreviewSessionCookie } from '../middleware/auth-scope';
+import { bearerToken } from '../shared/bearer-token';
 import { onSpaceAccessBust } from '../shared/space-access';
 import { recheckStreamAccess } from '../shared/stream-access-recheck';
 
@@ -163,12 +166,55 @@ export function matchPreviewWsPath(
 }
 
 /**
+ * Cross-site CSRF check for path-form preview WebSockets authenticated solely
+ * by an ambient `__preview_session` / `__preview_session_chips` cookie.
+ *
+ * Allows:
+ *  - same-origin upgrades (e.g. `voxl` desktop viewer framed on the API origin
+ *    opening `wss://<api-host>/v1/p/<sandbox>/6901/ws`), even when embedded as a
+ *    cross-site iframe under the Kortix web app;
+ *  - upgrades initiated directly by an allowlisted Kortix web-app origin;
+ *  - non-browser clients sending neither Origin nor a cross-site Sec-Fetch-Site.
+ *
+ * Refuses arbitrary third-party origins so another website cannot piggyback on
+ * the `SameSite=None` preview cookie to open a sandbox WebSocket.
+ */
+export function isPreviewPathWsOriginAllowed(req: Request, url: URL): boolean {
+  const origin = req.headers.get('origin');
+  if (origin) {
+    let originHost: string;
+    try {
+      originHost = new URL(origin).host.toLowerCase();
+    } catch {
+      return false;
+    }
+    const reqHost = (
+      req.headers.get('x-forwarded-host') ||
+      req.headers.get('host') ||
+      url.host
+    )
+      .split(',')[0]!
+      .trim()
+      .toLowerCase();
+    if (originHost === reqHost) return true;
+    return isAllowedPreviewOrigin(origin);
+  }
+  const wsSite = req.headers.get('sec-fetch-site');
+  if (wsSite && wsSite !== 'same-origin' && wsSite !== 'none') return false;
+  return true;
+}
+
+/**
  * Authenticate + resolve everything needed to upgrade a preview WS.
+ * Accepts explicit credentials (`Authorization`, `X-Kortix-Token`, `?token=`)
+ * or the path-form preview cookie (`__preview_session_chips` / `__preview_session`)
+ * for browser clients such as the port-6901 `voxl` desktop viewer.
  * On success returns the `data` payload to hand to `server.upgrade`.
  * On failure returns an HTTP status + message for the caller to respond with.
  */
 export async function preparePreviewWsUpgrade(
   url: URL,
+  req?: Request,
 ): Promise<
   | { ok: true; data: PreviewWsData }
   | { ok: false; status: number; message: string }
@@ -177,12 +223,22 @@ export async function preparePreviewWsUpgrade(
   if (!match) return { ok: false, status: 404, message: 'not a preview route' };
 
   const { sandboxId, port, remainingPath } = match;
-  // The PTY terminal: a shell into the sandbox. The validator names the
-  // caller; this names the sandbox, so the owner sees who opened it.
+  // The PTY terminal / desktop stream: name the sandbox so the audit sees it.
   bindPreviewResource(sandboxId, port);
 
+  const explicitToken =
+    (req ? bearerToken(req.headers.get('Authorization')) : null) ??
+    (req ? req.headers.get('X-Kortix-Token') : null) ??
+    url.searchParams.get('token');
+  const cookieToken =
+    !explicitToken && req ? readPreviewSessionCookie(req.headers.get('Cookie')) : null;
+
+  if (!explicitToken && cookieToken && req && !isPreviewPathWsOriginAllowed(req, url)) {
+    return { ok: false, status: 403, message: 'cross-site websocket to a preview' };
+  }
+
   const principal = await authenticatePreviewPrincipalDetailed(
-    url.searchParams.get('token'),
+    explicitToken ?? cookieToken,
     sandboxId,
   );
   if (!principal) return { ok: false, status: 401, message: 'unauthorized' };

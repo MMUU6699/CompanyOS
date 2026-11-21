@@ -30,4 +30,11 @@ describe('isCookieCsrfRefused', () => {
     expect(refused('POST', { cookie: COOKIE, 'x-kortix-token': 'kortix_x', 'sec-fetch-site': 'cross-site' })).toBe(false);
     expect(refused('POST', { 'sec-fetch-site': 'cross-site' })).toBe(false);
   });
+
+  test('the CHIPS partitioned preview cookie carries the same CSRF gate', () => {
+    const chips = '__preview_session_chips=abc';
+    expect(refused('POST', { cookie: chips, 'sec-fetch-site': 'cross-site' })).toBe(true);
+    expect(refused('POST', { cookie: chips, 'sec-fetch-site': 'same-origin' })).toBe(false);
+    expect(refused('GET', { cookie: chips, 'sec-fetch-site': 'cross-site' })).toBe(false);
+  });
 });

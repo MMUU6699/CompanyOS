@@ -27,10 +27,17 @@ import {
   INVALID_OR_EXPIRED_TOKEN_MESSAGE,
   PREVIEW_SANDBOX_DENIED_MESSAGE,
 } from '../shared/dead-credential-log';
-import { enforceTokenProjectScope, extractPreviewSandboxId, setPreviewSessionCookie } from './auth-scope';
+import {
+  PREVIEW_SESSION_COOKIE,
+  PREVIEW_SESSION_COOKIE_PARTITIONED,
+  enforceTokenProjectScope,
+  extractPreviewSandboxId,
+  readPreviewSessionCookie,
+  setPreviewSessionCookie,
+} from './auth-scope';
 import { bearerToken } from '../shared/bearer-token';
 
-const PREVIEW_SESSION_COOKIE = '__preview_session';
+const PREVIEW_SESSION_COOKIES = [PREVIEW_SESSION_COOKIE_PARTITIONED, PREVIEW_SESSION_COOKIE] as const;
 
 
 /**
@@ -51,7 +58,7 @@ const PREVIEW_SESSION_COOKIE = '__preview_session';
 export async function combinedAuth(c: Context, next: Next) {
   const endAuth = beginStage('auth');
   try {
-    return await withTokenAttemptBudget(c, presentedKortixToken(c, PREVIEW_SESSION_COOKIE), () =>
+    return await withTokenAttemptBudget(c, presentedKortixToken(c, PREVIEW_SESSION_COOKIES), () =>
       resolveCombinedAuth(c, () =>
         applyImpersonation(c, () => withActor(c, () => (endAuth(), next()))),
       ),
@@ -98,11 +105,7 @@ function extractToken(c: Context, previewSandboxId: string | null) {
 
   if (!token) {
     // Check for session cookie (set via POST /v1/p/auth or by prior requests)
-    const cookieHeader = c.req.header('Cookie') || '';
-    const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${PREVIEW_SESSION_COOKIE}=([^;]+)`));
-    if (match) {
-      token = decodeURIComponent(match[1]);
-    }
+    token = readPreviewSessionCookie(c.req.header('Cookie')) ?? undefined;
   }
 
   if (!token) {

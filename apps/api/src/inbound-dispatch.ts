@@ -293,10 +293,10 @@ async function handlePreviewProxyUpgrade(req: Request, url: URL, server: any): P
         headers: { 'Content-Type': 'application/json', 'Retry-After': '5' },
       });
     }
-    const prep = await preparePreviewWsUpgrade(url);
+    const prep = await preparePreviewWsUpgrade(url, req);
     if (!prep.ok) {
       console.warn(
-        `[preview-ws] REFUSED ${prep.status} ${prep.message} path=${url.pathname} hasToken=${url.searchParams.has('token')}`,
+        `[preview-ws] REFUSED ${prep.status} ${prep.message} path=${url.pathname} hasToken=${url.searchParams.has('token')} hasCookie=${Boolean(req.headers.get('cookie'))}`,
       );
       return new Response(JSON.stringify({ error: prep.message }), {
         status: prep.status,
