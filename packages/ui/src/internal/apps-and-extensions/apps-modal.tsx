@@ -14,9 +14,7 @@
 import { useChromeConnections } from '@kortix/sdk/react';
 import {
   ArrowUpRightIcon,
-  DownloadSimpleIcon,
   LaptopIcon,
-  MonitorIcon,
   PlugsConnectedIcon,
   TerminalWindowIcon,
   type Icon,
@@ -36,12 +34,10 @@ import { ChromeMock } from '../chrome/chrome-mock';
 import { chromeCardState } from '../chrome/chrome-card-state';
 import { chromeCounts } from '../chrome/chrome-names';
 import { SolidCheckIcon } from '../icons/solid-check-icon';
-import { detectPlatform, isMobilePlatform } from '../lib/detect-os';
 import { useOwnsPairedComputer } from '../tunnel/computer-connect';
 import { errorToast } from '../../primitives/toast';
 import { useCopy } from '../hooks/use-copy';
 import { useTranslations } from '../../i18n';
-import { desktopDownloadUrl, isDesktop } from '../lib/desktop';
 import {
   useUiHostConfig,
   useUiPathname,
@@ -193,10 +189,6 @@ function ComputerSection({ onOpenComputer }: { onOpenComputer: () => void }) {
   const t = useTranslations('appsModal.computer');
   const { owned } = useOwnsPairedComputer();
   const live = owned.some((machine) => machine.isLive);
-  const inShell = typeof window !== 'undefined' && isDesktop();
-  const platform = typeof navigator === 'undefined' ? null : detectPlatform(navigator.userAgent);
-  const download =
-    platform && !isMobilePlatform(platform) ? desktopDownloadUrl(platform) : desktopDownloadUrl();
 
   return (
     <Group title={t('title')}>
@@ -222,21 +214,6 @@ function ComputerSection({ onOpenComputer }: { onOpenComputer: () => void }) {
           >
             {live ? t('manage') : t('connect')}
           </Button>
-        }
-      />
-      <AppRow
-        icon={MonitorIcon}
-        name={t('desktop')}
-        description={inShell ? t('desktopRunning') : t('desktopDescription')}
-        action={
-          inShell ? null : (
-            <Button asChild size="sm" variant="secondary" className="gap-1.5">
-              <a href={download}>
-                <DownloadSimpleIcon className="size-3.5 shrink-0" />
-                {t('download')}
-              </a>
-            </Button>
-          )
         }
       />
     </Group>

@@ -17,6 +17,10 @@ export type CardRow = CardRowBase & {
   href: string;
   /** Store links leave the site and read "Open"; the internal platform redirects read "Download". */
   external?: boolean;
+  downloadFilename?: string;
+  actionLabel?: string;
+  comingSoon?: boolean;
+  comingSoonLabel?: string;
 };
 
 /**
@@ -87,29 +91,53 @@ export function PlatformCard({
               ) : null}
             </div>
 
-            <Button
-              asChild
-              size="sm"
-              variant={row.id === filled ? 'default' : 'outline'}
-              className="shrink-0 active:scale-[0.96]"
-            >
-              <Link
-                href={row.href}
-                // Five buttons with one short label are useless to a screen
-                // reader. The accessible name keeps the visible label and adds
-                // the platform or the store.
-                aria-label={
-                  row.external
-                    ? `${tI18nComplete.raw('texted077f3d8125')} ${row.meta}`
-                    : tI18nComplete('text8d602d64e902', { value0: row.label })
-                }
-                {...(row.external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+            {row.comingSoon ? (
+              <span
+                aria-disabled="true"
+                className="border-border text-muted-foreground inline-flex h-8 shrink-0 cursor-default items-center rounded-md border px-3 text-xs font-medium select-none"
               >
-                {row.external
-                  ? tI18nComplete.raw('texted077f3d8125')
-                  : tI18nComplete.raw('textd6eafe823591')}
-              </Link>
-            </Button>
+                {row.comingSoonLabel ?? 'Coming Soon'}
+              </span>
+            ) : row.downloadFilename ? (
+              <Button
+                asChild
+                size="sm"
+                variant={row.id === filled ? 'default' : 'outline'}
+                className="shrink-0 active:scale-[0.96]"
+              >
+                <a
+                  href={row.href}
+                  download={row.downloadFilename}
+                  aria-label={tI18nComplete('text8d602d64e902', { value0: row.label })}
+                >
+                  {row.actionLabel ?? 'Download APK'}
+                </a>
+              </Button>
+            ) : (
+              <Button
+                asChild
+                size="sm"
+                variant={row.id === filled ? 'default' : 'outline'}
+                className="shrink-0 active:scale-[0.96]"
+              >
+                <Link
+                  href={row.href}
+                  // Five buttons with one short label are useless to a screen
+                  // reader. The accessible name keeps the visible label and adds
+                  // the platform or the store.
+                  aria-label={
+                    row.external
+                      ? `${tI18nComplete.raw('texted077f3d8125')} ${row.meta}`
+                      : tI18nComplete('text8d602d64e902', { value0: row.label })
+                  }
+                  {...(row.external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+                >
+                  {row.external
+                    ? tI18nComplete.raw('texted077f3d8125')
+                    : tI18nComplete.raw('textd6eafe823591')}
+                </Link>
+              </Button>
+            )}
           </li>
         ))}
       </ul>

@@ -6,9 +6,14 @@ import {
   assertFreeOpenRouterModelId,
   callUpstream,
   isAllowedFreeOpenRouterModelId,
+  openDirectStream,
 } from './call-upstream';
 import { dispatch } from '../pipeline/dispatch';
-import { CircuitBreakers } from '../pipeline/circuit-breaker';
+import {
+  CircuitBreakers,
+  openRouterFreeBreakers,
+  tripsOpenRouterBreaker,
+} from '../pipeline/circuit-breaker';
 
 const FREE_CHAIN = [
   'nvidia/nemotron-3.5-lightning:free',
@@ -323,4 +328,105 @@ test('dispatch fails over on empty SSE stream from Primary -> Fallback 1 streami
   assert.equal(outcome.response?.status, 200);
   assert.equal(outcome.model, FREE_CHAIN[1]);
   assert.deepEqual(triedModels, [FREE_CHAIN[0], FREE_CHAIN[1]]);
+});
+
+test('OpenRouter circuit breaker opens on 1st 404/429, skips Primary during cooldown, and recovers on half-open probe', async () => {
+  assert.equal(tripsOpenRouterBreaker(404), true);
+  assert.equal(tripsOpenRouterBreaker(429), true);
+  assert.equal(tripsOpenRouterBreaker(504), true);
+  assert.equal(tripsOpenRouterBreaker(400), false);
+  // Default openRouterFreeBreakers config: 1st failure opens circuit immediately
+  assert.equal(openRouterFreeBreakers instanceof CircuitBreakers, true);
+
+  let fakeNow = 1_000_000;
+  const breakers = new CircuitBreakers({
+    consecutiveFailures: 1,
+    failureRatio: 0.5,
+    minRequests: 2,
+    windowMs: 60_000,
+    cooldownMs: 5 * 60_000,
+    maxCooldownMs: 10 * 60_000,
+    now: () => fakeNow,
+  });
+
+  let primaryHealthy = false;
+  const callsPerRequest: string[][] = [];
+
+  const fetchImpl = async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body)) as { model: string };
+    callsPerRequest[callsPerRequest.length - 1]!.push(body.model);
+    if (body.model === FREE_CHAIN[0] && !primaryHealthy) {
+      return Response.json(
+        { error: { code: 404, message: 'No endpoints found for rotated free model' } },
+        { status: 404 },
+      );
+    }
+    return Response.json({
+      id: `ok-${body.model}`,
+      model: body.model,
+      choices: [{ index: 0, message: { role: 'assistant', content: `served by ${body.model}` } }],
+    });
+  };
+
+  const resolveCandidates = async (model: string) => [makeDescriptor(model, [model])];
+  const runOne = async (reqId: string) => {
+    callsPerRequest.push([]);
+    return dispatch(
+      { model: FREE_CHAIN[0], stream: false, messages: [{ role: 'user', content: 'ping' }] },
+      {
+        model: FREE_CHAIN[0],
+        candidates: await resolveCandidates(FREE_CHAIN[0]),
+        fallbackModels: FREE_CHAIN.slice(1),
+        fallbackOn: 'any-error',
+      },
+      {
+        requestId: reqId,
+        logger: silentLogger,
+        fetchImpl,
+        resolveCandidates,
+        breakers,
+      },
+    );
+  };
+
+  // Request 1: Primary returns 404 -> trips breaker on 1st failure & fails over to Fallback 1 immediately.
+  const r1 = await runOne('cb-req-1');
+  assert.equal(r1.response?.status, 200);
+  assert.equal(r1.model, FREE_CHAIN[1]);
+  assert.deepEqual(callsPerRequest[0], [FREE_CHAIN[0], FREE_CHAIN[1]]);
+  assert.equal(breakers.snapshot().length, 1);
+
+  // Request 2 (+30s, inside 5-min cooldown): Primary is skipped cleanly (0 calls to Primary!).
+  fakeNow += 30_000;
+  const r2 = await runOne('cb-req-2');
+  assert.equal(r2.response?.status, 200);
+  assert.equal(r2.model, FREE_CHAIN[1]);
+  assert.deepEqual(callsPerRequest[1], [FREE_CHAIN[1]]);
+  assert.ok(r2.candidatesTried.some((entry) => entry.includes('circuit_open')));
+
+  // Request 3 (+5m): Half-open probe sees Primary healthy -> closes circuit & serves on Primary again.
+  fakeNow += 5 * 60_000;
+  primaryHealthy = true;
+  const r3 = await runOne('cb-req-3');
+  assert.equal(r3.response?.status, 200);
+  assert.equal(r3.model, FREE_CHAIN[0]);
+  assert.deepEqual(callsPerRequest[2], [FREE_CHAIN[0]]);
+  assert.equal(breakers.snapshot().length, 0);
+});
+
+test('openDirectStream throws UpstreamHttpError(504) when failOnTimeout deadline expires before first data frame', async () => {
+  const hungStream = new ReadableStream<Uint8Array>({
+    start() {
+      // Never enqueues a data frame
+    },
+  });
+  const response = new Response(hungStream, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+
+  await assert.rejects(
+    () => openDirectStream(response, 'openrouter', { commitAfterMs: 40, failOnTimeout: true }),
+    (err: any) => err?.name === 'UpstreamHttpError' && err?.status === 504,
+  );
 });

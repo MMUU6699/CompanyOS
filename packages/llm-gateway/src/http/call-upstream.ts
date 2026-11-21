@@ -341,6 +341,8 @@ async function directOpenAiRequest(
  * long; the Cloudflare response deadline in front of the API is 100 s.
  */
 export const DIRECT_STREAM_COMMIT_MS = 10_000;
+export const OPENROUTER_STREAM_FIRST_TOKEN_TIMEOUT_MS =
+  Number(process.env.OPENROUTER_FIRST_TOKEN_TIMEOUT_MS) || 15_000;
 
 // Comment bytes read without a `data:` frame before the stream is committed anyway.
 const DIRECT_STREAM_PEEK_MAX_CHARS = 64 * 1024;
@@ -349,18 +351,19 @@ const DIRECT_STREAM_PEEK_MAX_CHARS = 64 * 1024;
  * Reads a streamed direct response up to its first `data:` frame, for at most
  * `commitAfterMs`. An error frame there served nothing, so it throws the
  * `UpstreamHttpError` a non-2xx answer throws: dispatch fails over, and the
- * client gets an HTTP error. pi compacts and retries on a 400
- * `context_length_exceeded` and retries a 429 (kortixd `harness/pi/runtime.ts`,
- * `harness/pi/transient-retry.ts`). OpenCode read an in-band error frame as an
- * UnknownError and ended the turn. Any other first frame, a timeout, a
- * client abort, or EOF returns a response that replays the bytes read and
- * continues the body, as the AI SDK transport's `openStream` does for its own
- * streams. The relay then settles a stopped prefill as it always did.
+ * client gets an HTTP error. When `failOnTimeout` is true (used for
+ * OpenRouter `:free` streams), exceeding `commitAfterMs` without receiving any
+ * `data:` frame aborts the upstream stream and throws `UpstreamHttpError(504)`
+ * so `dispatch()` trips the circuit breaker and fails over immediately.
  */
 export async function openDirectStream(
   response: Response,
   provider: string,
-  { commitAfterMs = DIRECT_STREAM_COMMIT_MS, signal }: { commitAfterMs?: number; signal?: AbortSignal } = {},
+  {
+    commitAfterMs = DIRECT_STREAM_COMMIT_MS,
+    failOnTimeout = false,
+    signal,
+  }: { commitAfterMs?: number; failOnTimeout?: boolean; signal?: AbortSignal } = {},
 ): Promise<Response> {
   if (!response.ok || !response.body) return response;
   const reader = response.body.getReader();
@@ -369,8 +372,15 @@ export async function openDirectStream(
   let text = '';
   let inFlight: ReturnType<typeof reader.read> | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const commit = new Promise<'commit'>((resolve) => {
-    timer = setTimeout(() => resolve('commit'), signal?.aborted ? 0 : commitAfterMs);
+  let timedOut = false;
+  const commit = new Promise<'commit' | 'timeout'>((resolve) => {
+    timer = setTimeout(
+      () => {
+        timedOut = failOnTimeout && !signal?.aborted;
+        resolve(timedOut ? 'timeout' : 'commit');
+      },
+      signal?.aborted ? 0 : commitAfterMs,
+    );
     signal?.addEventListener('abort', () => resolve('commit'), { once: true });
   });
   let sawDataFrame = false;
@@ -379,6 +389,11 @@ export async function openDirectStream(
       const reading = reader.read();
       inFlight = reading;
       const next = await Promise.race([reading, commit]);
+      if (next === 'timeout') {
+        reading.catch(() => {});
+        await reader.cancel().catch(() => {});
+        throw new UpstreamHttpError(504, 'OpenRouter stream first-token timeout', provider);
+      }
       if (next === 'commit') {
         // The replay below hands this read to the relay, which handles its result.
         reading.catch(() => {});
@@ -457,9 +472,15 @@ export async function callUpstream(
     const google = isGoogleOpenAiUpstream(descriptor);
     const sent = google ? restoreGeminiThoughtSignatures(body, descriptor.resolvedModel) : body;
     const response = await directOpenAiRequest(sent, descriptor, opts);
+    const isOpenRouter = isOpenRouterDescriptor(descriptor);
     const opened = streaming
-      ? await openDirectStream(response, descriptor.provider, { signal: clientSignal })
-      : isOpenRouterDescriptor(descriptor)
+      ? await openDirectStream(response, descriptor.provider, {
+          signal: clientSignal,
+          ...(isOpenRouter
+            ? { commitAfterMs: OPENROUTER_STREAM_FIRST_TOKEN_TIMEOUT_MS, failOnTimeout: true }
+            : {}),
+        })
+      : isOpenRouter
         ? await validateNonStreamingOpenRouterResponse(response)
         : response;
     return google ? exposeGeminiThoughtSignaturesInResponse(opened, streaming) : opened;

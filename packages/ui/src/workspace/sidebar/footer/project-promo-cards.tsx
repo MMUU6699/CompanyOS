@@ -2,7 +2,6 @@
 
 import { ChromePromoSlide, useChromePromoDismissed } from './project-chrome-nav';
 import { ComputerPromoSlide, useComputerPromoDismissed } from './project-computer-nav';
-import { useDesktopAppPromo } from './project-download-app-nav';
 import { useMcpPromo } from './project-mcp-nav';
 import { usePhoneAppPromo } from './project-phone-app-nav';
 import { PromoSwitcher, type PromoSlide } from './promo-card';
@@ -46,7 +45,6 @@ export function ProjectPromoCards({
 }) {
   const t = useTranslations('sidebar');
   const mcp = useMcpPromo(onOpenMcp);
-  const desktop = useDesktopAppPromo(onOpenDownloadApp);
   const phone = usePhoneAppPromo(onOpenDownloadApp);
   const [computerDismissed, dismissComputer] = useComputerPromoDismissed();
   const [chromeDismissed, dismissChrome] = useChromePromoDismissed();
@@ -56,7 +54,7 @@ export function ProjectPromoCards({
       label={t('promos')}
       variant={variant}
       composer={composer}
-      slides={[mcp, computer, chrome, desktop, phone].filter(
+      slides={[mcp, computer, chrome, phone].filter(
         (slide): slide is PromoSlide => slide !== null,
       )}
     />

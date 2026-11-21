@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import {
   assertFreeOpenRouterModelId,
   GatewayResolutionError,
@@ -5,6 +6,7 @@ import {
   type UpstreamDescriptor,
 } from '@kortix/llm-gateway';
 import { config } from '../../config';
+import { db, hasDatabase } from '../../shared/db';
 import type { ManagedModel } from '../models/managed-models';
 
 /**
@@ -42,31 +44,48 @@ const OPENROUTER_MODEL_DISPLAY_NAMES: Record<string, string> = {
   'openrouter/free': 'OpenRouter Free Router',
 };
 
-/**
- * Returns the active 100% FREE OpenRouter fallback chain.
- * If `OPENROUTER_FREE_MODELS` is set (comma-separated), every entry is
- * strictly validated: any non-free slug throws immediately rather than
- * risking a paid upstream call. Always guarantees `openrouter/free` as the
- * final free-only safety net.
- */
-export function openRouterFreeChain(): readonly string[] {
-  const raw = (config.OPENROUTER_FREE_MODELS ?? '').trim();
-  if (!raw) return DEFAULT_OPENROUTER_FREE_CHAIN;
+const CLOUD_CONFIG_KEY = 'openrouter_free_models';
+const CLOUD_CACHE_TTL_MS = 30_000;
 
-  const parsed = raw
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+let cachedCloudChain: readonly string[] | null = null;
+let cachedCloudChainExpiresAt = 0;
+let cloudRefreshInFlight: Promise<readonly string[]> | null = null;
 
-  if (parsed.length === 0) return DEFAULT_OPENROUTER_FREE_CHAIN;
+function parseRawModelEntries(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.map((entry) => (typeof entry === 'string' ? entry.trim() : '')).filter(Boolean);
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith('[')) {
+      try {
+        const decoded = JSON.parse(trimmed);
+        if (Array.isArray(decoded)) {
+          return decoded
+            .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+            .filter(Boolean);
+        }
+      } catch {
+        // Fall through to comma-separated parse.
+      }
+    }
+    return trimmed
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
 
+function validateFreeChainOrThrow(entries: string[], sourceName: string): readonly string[] {
   const validated: string[] = [];
-  for (const modelId of parsed) {
+  for (const modelId of entries) {
     if (!isAllowedFreeOpenRouterModelId(modelId)) {
       throw new GatewayResolutionError(
         'model_disabled_on_deployment',
-        `OPENROUTER_FREE_MODELS contains non-free model "${modelId}". Only ":free" models or "openrouter/free" are allowed.`,
-        'Remove paid models from OPENROUTER_FREE_MODELS and keep only ":free" models or "openrouter/free".',
+        `${sourceName} contains non-free model "${modelId}". Only ":free" models or "openrouter/free" are allowed.`,
+        `Remove paid models from ${sourceName} and keep only ":free" models or "openrouter/free".`,
       );
     }
     if (!validated.includes(modelId)) {
@@ -77,6 +96,76 @@ export function openRouterFreeChain(): readonly string[] {
     validated.push(OPENROUTER_FREE_SAFETY_NET);
   }
   return validated;
+}
+
+function envOpenRouterFreeChain(): readonly string[] {
+  const raw = (config.OPENROUTER_FREE_MODELS ?? '').trim();
+  if (!raw) return DEFAULT_OPENROUTER_FREE_CHAIN;
+  const parsed = parseRawModelEntries(raw);
+  if (parsed.length === 0) return DEFAULT_OPENROUTER_FREE_CHAIN;
+  return validateFreeChainOrThrow(parsed, 'OPENROUTER_FREE_MODELS');
+}
+
+/**
+ * Refreshes the active `:free` fallback chain from Supabase `kortix.runtime_config`
+ * (`key = 'openrouter_free_models'`) with a 30s in-memory cache so cloud model
+ * order/failover changes take effect immediately across Web + existing APKs with
+ * zero rebuilds. Any non-free/paid entry in DB is rejected with a warning.
+ */
+export async function refreshOpenRouterFreeChainIfStale(): Promise<readonly string[]> {
+  const now = Date.now();
+  if (now < cachedCloudChainExpiresAt) {
+    return openRouterFreeChain();
+  }
+  if (cloudRefreshInFlight) return cloudRefreshInFlight;
+
+  cloudRefreshInFlight = (async (): Promise<readonly string[]> => {
+    try {
+      if (hasDatabase) {
+        const rows = (await db.execute<{ value: unknown }>(
+          sql`SELECT value FROM kortix.runtime_config WHERE key = ${CLOUD_CONFIG_KEY} LIMIT 1`,
+        )) as Array<{ value: unknown }>;
+        const entries = rows?.[0] ? parseRawModelEntries(rows[0].value) : [];
+        if (entries.length > 0) {
+          try {
+            cachedCloudChain = validateFreeChainOrThrow(entries, `runtime_config.${CLOUD_CONFIG_KEY}`);
+          } catch (err) {
+            console.warn(
+              '[openrouter-free] ignoring invalid cloud runtime_config override:',
+              err instanceof Error ? err.message : String(err),
+            );
+            cachedCloudChain = null;
+          }
+        } else {
+          cachedCloudChain = null;
+        }
+      }
+    } catch (err) {
+      // Missing table or transient DB error never blocks inference; keep env/default chain.
+      console.warn(
+        '[openrouter-free] runtime_config refresh failed (using env/default chain):',
+        err instanceof Error ? err.message : String(err),
+      );
+    } finally {
+      cachedCloudChainExpiresAt = Date.now() + CLOUD_CACHE_TTL_MS;
+      cloudRefreshInFlight = null;
+    }
+    return openRouterFreeChain();
+  })();
+
+  return cloudRefreshInFlight;
+}
+
+/**
+ * Returns the active 100% FREE OpenRouter fallback chain (cloud override if
+ * present & valid, else `OPENROUTER_FREE_MODELS` env var, else default chain).
+ * Paid models are always refused; `openrouter/free` is always appended last.
+ */
+export function openRouterFreeChain(): readonly string[] {
+  if (cachedCloudChain && cachedCloudChain.length > 0) {
+    return cachedCloudChain;
+  }
+  return envOpenRouterFreeChain();
 }
 
 export function primaryOpenRouterFreeModelId(): string {

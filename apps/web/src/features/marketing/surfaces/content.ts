@@ -50,7 +50,11 @@ import {
   TerminalWindowIcon,
   UsersThreeIcon,
 } from '@phosphor-icons/react/dist/ssr';
-import { APP_STORE_URL, GOOGLE_PLAY_URL } from '@kortix/ui/internal/lib/mobile-store-urls';
+import {
+  DIRECT_ANDROID_APK_FILENAME,
+  DIRECT_ANDROID_APK_SIZE_LABEL,
+  DIRECT_ANDROID_APK_URL,
+} from '@kortix/ui/internal/lib/mobile-store-urls';
 
 import type { MarkId } from './surface-mark';
 
@@ -61,6 +65,8 @@ export type SurfaceAction = {
   href: string;
   external?: boolean;
   primary?: boolean;
+  comingSoon?: boolean;
+  downloadFilename?: string;
   icon?: MarkId;
 };
 
@@ -88,8 +94,7 @@ export type SurfaceContent = {
 
 /** Every surface, in menu order, with the one line its cross-link cell shows. */
 export const SURFACE_ORDER: readonly { id: SurfaceId; href: string; name: string; line: string }[] = [
-  { id: 'desktop', href: '/desktop', name: 'Desktop', line: 'macOS, Windows and Linux, with Quick Entry.' },
-  { id: 'mobile', href: '/mobile', name: 'Mobile', line: 'iPhone, iPad and Android.' },
+  { id: 'mobile', href: '/mobile', name: 'Mobile', line: 'Direct Android APK. iOS coming soon.' },
   { id: 'slack', href: '/slack', name: 'Slack', line: 'Mention it in a thread.' },
   { id: 'teams', href: '/teams', name: 'Microsoft Teams', line: 'Chats, group chats and channels.' },
 ];
@@ -214,14 +219,20 @@ const MOBILE: SurfaceContent = {
   hero: {
     title: 'Kortix on your phone.',
     titleMuted: 'Start, follow and approve work from anywhere.',
-    sub: 'The native app for iPhone, iPad and Android. Start a session, watch it work, and answer an agent the moment it asks.',
+    sub: 'Get Kortix for Android via direct APK download. Start a session, watch it work, and answer an agent the moment it asks.',
     actions: [
-      { label: 'App Store', href: APP_STORE_URL, external: true, primary: true, icon: 'appstore' },
-      { label: 'Google Play', href: GOOGLE_PLAY_URL, external: true, icon: 'googleplay' },
+      {
+        label: 'Download APK (Android)',
+        href: DIRECT_ANDROID_APK_URL,
+        downloadFilename: DIRECT_ANDROID_APK_FILENAME,
+        primary: true,
+        icon: 'android',
+      },
+      { label: 'iOS · Coming Soon', href: '#ios-coming-soon', comingSoon: true, icon: 'apple' },
     ],
-    note: 'iOS 16.4 or later · iPad supported · Android on Google Play',
-    caption: 'The app as it ships.',
-    captionMuted: 'Six screens from the App Store listing.',
+    note: `Direct Android APK (${DIRECT_ANDROID_APK_SIZE_LABEL} · arm64) · iOS Coming Soon`,
+    caption: 'The app in action.',
+    captionMuted: 'Screens from the Kortix mobile app.',
   },
   pillars: {
     title: 'Your agents, wherever you are.',
@@ -299,13 +310,13 @@ const MOBILE: SurfaceContent = {
     {
       id: 'mobile-devices',
       question: 'Which devices does it run on?',
-      answer: 'iPhone and iPad with iOS 16.4 or later, and Android phones from Google Play.',
+      answer: 'Android devices (arm64) via direct APK download. iPhone and iPad (iOS) support is Coming Soon.',
     },
     {
       id: 'mobile-same-sessions',
       question: 'Are these the same sessions as on the web?',
       answer:
-        'Yes. The web app, the desktop app and the phone read the same projects and sessions. Start on one and continue on another.',
+        'Yes. The web app and the mobile app read the same projects and sessions. Start on one and continue on another.',
     },
     {
       id: 'mobile-invites',

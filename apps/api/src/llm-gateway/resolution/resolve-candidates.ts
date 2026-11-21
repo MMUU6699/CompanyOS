@@ -1,5 +1,8 @@
 import { isClaudeAgentModelRef } from './claude-agent';
-import { openRouterFreeDescriptorForModel } from './openrouter-free';
+import {
+  openRouterFreeDescriptorForModel,
+  refreshOpenRouterFreeChainIfStale,
+} from './openrouter-free';
 import { resolveClaudeCredentials } from '../../claude-subscription/accounts';
 import { getProjectGatewayResolution, type getProjectModelAccess } from '../../repositories/project-model-access';
 import {
@@ -509,8 +512,9 @@ export async function resolveCandidates(
   model: string,
   _options?: { providerSecretPools?: Record<string, string[]>; probe?: boolean },
 ): Promise<UpstreamDescriptor[]> {
-  // Strictly 100% FREE-ONLY OpenRouter multi-model fallback chain.
+  // Strictly 100% FREE-ONLY OpenRouter multi-model fallback chain (refreshed every 30s from cloud).
   // Arbitrary paid models and BYOK overrides are blocked by hard guard.
+  await refreshOpenRouterFreeChainIfStale().catch(() => undefined);
   return [openRouterFreeDescriptorForModel(model)];
 }
 

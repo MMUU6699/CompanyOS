@@ -242,12 +242,6 @@ export const surfaces = {
   items: [
     { id: 'web', k: 'Web app', v: 'The main place to work.', href: '/docs/guide#everywhere' },
     {
-      id: 'desktop',
-      k: 'Desktop',
-      v: 'Quick Entry starts a session from any app.',
-      href: '/desktop',
-    },
-    {
       id: 'mobile',
       k: 'Mobile',
       v: 'Follow sessions and get notified when one needs you.',

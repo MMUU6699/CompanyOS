@@ -1,5 +1,9 @@
 import { type AuthedPrincipal, GatewayResolutionError } from '@kortix/llm-gateway';
-import { isInOpenRouterFreeChain, primaryOpenRouterFreeModelId } from './openrouter-free';
+import {
+  isInOpenRouterFreeChain,
+  primaryOpenRouterFreeModelId,
+  refreshOpenRouterFreeChainIfStale,
+} from './openrouter-free';
 import { connectedByokPickerModels } from '../models/picker-catalog';
 import { DEFAULT_AGENT_SENTINEL } from '../../projects/agents';
 import {
@@ -181,6 +185,7 @@ async function ownModelDefault(
 export async function resolveDefaultModelForPrincipal(
   _principal: AuthedPrincipal,
 ): Promise<string | undefined> {
+  await refreshOpenRouterFreeChainIfStale().catch(() => undefined);
   return primaryOpenRouterFreeModelId();
 }
 
@@ -195,6 +200,7 @@ export async function isModelServableForAccount(params: {
   personalUserId?: string | null;
   restingIsServable?: boolean;
 }): Promise<boolean> {
+  await refreshOpenRouterFreeChainIfStale().catch(() => undefined);
   return isInOpenRouterFreeChain(toWireModel(params.model));
 }
 
@@ -209,6 +215,7 @@ export async function resolveEffectiveModel(_params: {
   providerSecretPools?: Record<string, string[]>;
   personalUserId?: string | null;
 }): Promise<{ model: string | null; source: ModelSource }> {
+  await refreshOpenRouterFreeChainIfStale().catch(() => undefined);
   return { model: primaryOpenRouterFreeModelId(), source: 'platform' };
 }
 

@@ -1,4 +1,8 @@
-import { openRouterFreeGatewayModel, primaryOpenRouterFreeModelId } from '../resolution/openrouter-free';
+import {
+  openRouterFreeGatewayModel,
+  primaryOpenRouterFreeModelId,
+  refreshOpenRouterFreeChainIfStale,
+} from '../resolution/openrouter-free';
 import type { gatewayModelCatalog } from './catalog-models';
 import type { UnavailableModelMark } from './picker-catalog';
 
@@ -24,6 +28,7 @@ export async function servableProjectCatalog(_input: {
   personalUserId?: string | null;
   withoutRefusedKeys?: boolean;
 }): Promise<ServableProjectCatalog> {
+  await refreshOpenRouterFreeChainIfStale().catch(() => undefined);
   const primaryId = primaryOpenRouterFreeModelId();
   return {
     models: {

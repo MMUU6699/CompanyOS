@@ -15,6 +15,14 @@ export function AppleLogo({ className }: LogoProps) {
   );
 }
 
+export function AndroidLogo({ className }: LogoProps) {
+  return (
+    <svg aria-hidden viewBox="0 0 24 24" fill="currentColor" className={className}>
+      <path d="M17.523 15.3414a.9999.9999 0 1 1 0-1.9998.9999.9999 0 0 1 0 1.9998m-11.046 0a.9999.9999 0 1 1 0-1.9998.9999.9999 0 0 1 0 1.9998m11.4045-6.02 1.9973-3.4592a.416.416 0 1 0-.7204-.4159l-2.0222 3.503a11.981 11.981 0 0 0-5.1366-1.1243 11.98 11.98 0 0 0-5.1366 1.1243L4.8408 5.4463a.416.416 0 1 0-.7204.4159L6.1177 9.3214C2.6877 11.1867.339 14.6512 0 18.7327h24c-.339-4.0815-2.6877-7.546-6.1185-9.4113" />
+    </svg>
+  );
+}
+
 export function WindowsLogo({ className }: LogoProps) {
   return (
     <svg aria-hidden viewBox="0 0 24 24" fill="currentColor" className={className}>

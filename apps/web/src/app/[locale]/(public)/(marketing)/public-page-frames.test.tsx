@@ -51,7 +51,7 @@ mock.module('@/lib/use-cases-source', () => ({
 const Home = (await import('./(home)/page')).default;
 const PricingPage = (await import('./pricing/page')).default;
 const SecurityPage = (await import('./security/page')).default;
-const DesktopPage = (await import('./desktop/page')).default;
+const MobilePage = (await import('./mobile/page')).default;
 
 const dom = (html: string) => {
   const document = new Window().document;
@@ -76,7 +76,7 @@ describe('full marketing pages render in the landing frame', () => {
     ['home', Home],
     ['pricing', PricingPage],
     ['security', SecurityPage],
-    ['desktop', DesktopPage],
+    ['mobile', MobilePage],
   ] as const) {
     test(`${name} keeps the 1440 column and its two hairline rails`, () => {
       const document = dom(renderToStaticMarkup(<Page />));
@@ -141,8 +141,8 @@ describe('full marketing pages render in the landing frame', () => {
     expect(sections.length).toBeGreaterThanOrEqual(8);
   });
 
-  test('desktop keeps the surface page composition', () => {
-    const document = dom(renderToStaticMarkup(<DesktopPage />));
+  test('mobile keeps the surface page composition', () => {
+    const document = dom(renderToStaticMarkup(<MobilePage />));
     expect(document.querySelectorAll('main section').length).toBeGreaterThanOrEqual(4);
   });
 });

@@ -232,18 +232,10 @@ const MARKETING_RECORDS: PublicContentRecord[] = [
   },
   {
     kind: 'marketing',
-    slug: 'desktop',
-    title: 'Kortix desktop app for Mac, Windows and Linux',
-    description:
-      'The Kortix desktop app: Quick Entry over any app (⌘⇧Space), a badge for finished work, and an opt-in connection that lends an agent this computer. macOS universal, Windows 64-bit, Linux AppImage.',
-    htmlPath: '/desktop',
-  },
-  {
-    kind: 'marketing',
     slug: 'mobile',
-    title: 'Kortix mobile app for iPhone, iPad and Android',
+    title: 'Kortix mobile app for Android (iOS coming soon)',
     description:
-      'Start, steer and approve Kortix sessions from your phone: live streaming, dictation, attachments, tool approvals, change-request review and push notifications. On the App Store and Google Play.',
+      'Start, steer and approve Kortix sessions from your phone: live streaming, dictation, attachments, tool approvals, change-request review and push notifications. Direct Android APK available now; iOS coming soon.',
     htmlPath: '/mobile',
   },
   {

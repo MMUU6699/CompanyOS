@@ -69,23 +69,47 @@ function Hero({ content }: { content: SurfaceContent }) {
           <div className="flex flex-col gap-4">
             <div className="flex flex-wrap items-center gap-2.5">
               {hero.install ? <InstallCommand /> : null}
-              {hero.actions.map((action) => (
-                <MarketingButton
-                  key={action.href}
-                  variant={action.primary ? 'primary' : 'secondary'}
-                  size="md"
-                  className="hit-area-y-1"
-                  asChild
-                >
-                  <Link
-                    href={action.href}
-                    {...(action.external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+              {hero.actions.map((action) =>
+                action.comingSoon ? (
+                  <span
+                    key={action.label}
+                    aria-disabled="true"
+                    className="border-border text-muted-foreground inline-flex h-9 cursor-default items-center gap-2 rounded-md border px-3.5 text-sm font-medium select-none"
                   >
                     {action.icon ? <SurfaceMark id={action.icon} /> : null}
                     {action.label}
-                  </Link>
-                </MarketingButton>
-              ))}
+                  </span>
+                ) : action.downloadFilename ? (
+                  <MarketingButton
+                    key={action.href}
+                    variant={action.primary ? 'primary' : 'secondary'}
+                    size="md"
+                    className="hit-area-y-1"
+                    asChild
+                  >
+                    <a href={action.href} download={action.downloadFilename}>
+                      {action.icon ? <SurfaceMark id={action.icon} /> : null}
+                      {action.label}
+                    </a>
+                  </MarketingButton>
+                ) : (
+                  <MarketingButton
+                    key={action.href}
+                    variant={action.primary ? 'primary' : 'secondary'}
+                    size="md"
+                    className="hit-area-y-1"
+                    asChild
+                  >
+                    <Link
+                      href={action.href}
+                      {...(action.external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+                    >
+                      {action.icon ? <SurfaceMark id={action.icon} /> : null}
+                      {action.label}
+                    </Link>
+                  </MarketingButton>
+                ),
+              )}
             </div>
             <p className="text-muted-foreground text-sm text-pretty">{hero.note}</p>
           </div>

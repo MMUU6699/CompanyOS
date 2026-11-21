@@ -63,7 +63,6 @@ export const MEGA_MENUS: MegaMenu[] = [
         // (kortix-brand claims.md). Email has no page yet.
         title: 'Use it from',
         links: [
-          { label: 'Desktop', href: '/desktop' },
           { label: 'Mobile', href: '/mobile' },
           { label: 'Slack', href: '/slack' },
           { label: 'Microsoft Teams', href: '/teams' },

@@ -12,7 +12,14 @@ import { resolveTransportKind } from '../transports/route-kind';
 import { MAX_RELAYED_RETRY_AFTER_SECONDS, clampRetryAfterSeconds, providerClientErrorBody } from './error-response';
 import { applyGenerationDefaults } from './generation-defaults';
 import { type SubscriptionUsage, subscriptionUsageFromHeaders } from '../usage/subscription-usage';
-import { type CircuitBreakers, breakerKey, tripsBreaker, upstreamBreakers } from './circuit-breaker';
+import {
+  type CircuitBreakers,
+  breakerKey,
+  openRouterFreeBreakers,
+  tripsBreaker,
+  tripsOpenRouterBreaker,
+  upstreamBreakers,
+} from './circuit-breaker';
 import { publicUpstreamError, shownModel, shownProvider } from './public-identity';
 
 /**
@@ -111,13 +118,16 @@ const SYNTHETIC_STREAMING_HEADERS_TIMEOUT_MS =
  * AI SDK streams get five minutes because their synthetic gateway headers keep
  * the client alive while a large model prefill still waits on provider headers.
  */
+export const OPENROUTER_FIRST_TOKEN_TIMEOUT_MS =
+  Number(process.env.OPENROUTER_FIRST_TOKEN_TIMEOUT_MS) || 15_000;
+
 export function upstreamHeadersTimeoutMs(
   body: Record<string, unknown>,
   descriptor: UpstreamDescriptor,
   streaming: boolean,
 ): number {
   if (descriptor.provider === 'openrouter') {
-    return Math.min(UPSTREAM_HEADERS_TIMEOUT_MS, 45_000);
+    return Math.min(UPSTREAM_HEADERS_TIMEOUT_MS, OPENROUTER_FIRST_TOKEN_TIMEOUT_MS);
   }
   if (descriptor.provider === 'nvidia') {
     return Math.max(UPSTREAM_HEADERS_TIMEOUT_MS, 300_000);
@@ -576,9 +586,10 @@ export async function dispatch(
     };
   };
 
-  const breakers = ctx.breakers ?? upstreamBreakers;
   let attempt = first;
   for (;;) {
+    const isOpenRouterAttempt = attempt.descriptor.provider === 'openrouter';
+    const breakers = ctx.breakers ?? (isOpenRouterAttempt ? openRouterFreeBreakers : upstreamBreakers);
     const key = breakerKey(attempt.descriptor, attempt.model);
     const admitted = breakers.allow(key);
     if (!admitted) {
@@ -619,7 +630,10 @@ export async function dispatch(
         return { descriptor, model: servedModel, attempts, candidatesTried, attemptFailures, response: result };
       }
       if (result.error instanceof ClientAbortError || ctx.signal?.aborted) return finish(result);
-      if (tripsBreaker(result.status)) {
+      const shouldTrip = isOpenRouterAttempt
+        ? tripsOpenRouterBreaker(result.status)
+        : tripsBreaker(result.status);
+      if (shouldTrip) {
         const state = breakers.failure(key, {
           provider: attempt.descriptor.provider,
           model: attempt.descriptor.resolvedModel ?? attempt.model,

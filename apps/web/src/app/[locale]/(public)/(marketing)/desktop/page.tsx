@@ -1,7 +1,9 @@
-import { surfaceRoute } from '@/features/marketing/surfaces/surface-page';
+import { localizedMarketingMetadata } from '@/lib/seo/metadata';
+import { redirect } from 'next/navigation';
 
-/** `/desktop`: copy in features/marketing/surfaces/content.ts, layout in surface-page.tsx. */
-const { generateMetadata, Page } = surfaceRoute('desktop', '/desktop');
+/** `/desktop` is deprecated in favor of mobile-only downloads at `/download`. */
+export const generateMetadata = () => localizedMarketingMetadata('/download');
 
-export { generateMetadata };
-export default Page;
+export default function DesktopRedirectPage() {
+  redirect('/download');
+}

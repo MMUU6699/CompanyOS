@@ -23,7 +23,12 @@ export type {
 export type { AdmittedBodyResult, AdmittedBytesResult } from './pipeline/read-bounded-body';
 export { DEFAULT_IMAGE_WINDOW, applyImageWindow } from './pipeline/image-window';
 export { MAX_HOLD_SECONDS, SETUP_HOLD_SECONDS } from './pipeline/route-memory';
-export { CircuitBreakers, upstreamBreakers } from './pipeline/circuit-breaker';
+export {
+  CircuitBreakers,
+  openRouterFreeBreakers,
+  tripsOpenRouterBreaker,
+  upstreamBreakers,
+} from './pipeline/circuit-breaker';
 export { withFailureDetail } from './pipeline/trace';
 export { readRequestOrigin, REQUEST_ORIGIN_HEADERS, type RequestOrigin } from './pipeline/request-origin';
 export type { ImageWindowOptions, ImageWindowResult } from './pipeline/image-window';

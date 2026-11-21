@@ -88,3 +88,21 @@ Because this session does not have `invoke_subagent` in its tool schema to opera
        - `kortix://**`
        - `exp+kortix://**`
    - After saving, verify `GET https://qeqfblzxfofaynevchbd.supabase.co/auth/v1/settings` returns `"google": true`.
+
+---
+
+## 6. Cloud-Controlled Free OpenRouter Failover, Daytona LRU Quotas & Mobile-Only Distribution (Decisions 7–9)
+
+### Decision 7: Cloud Hot-Swappable 100% Free OpenRouter Chain & 1-Failure Circuit Breaker
+- **Superseded Decision 1 (NVIDIA single-model lock)**: Switched managed inference to an OpenRouter 100% free-only fallback chain (`:free` + `openrouter/free` enforced by `assertFreeOpenRouterModelId` / `isAllowedFreeOpenRouterModelId`).
+- **Cloud Control Plane (`kortix.runtime_config` + `OPENROUTER_FREE_MODELS`)**: To change or reorder models for both Web and existing installed APKs without rebuilding clients, update row `key = 'openrouter_free_models'` in Supabase `kortix.runtime_config` (takes effect globally within the `30_000 ms` TTL of `refreshOpenRouterFreeChainIfStale()`) or update `OPENROUTER_FREE_MODELS` in Railway env vars.
+- **Fast Failover**: Configured `openRouterFreeBreakers` (`consecutiveFailures: 1`, `cooldownMs: 300_000`, `maxCooldownMs: 600_000`), `tripsOpenRouterBreaker` (`404`/`408`/`409`/`425`/`429`/`5xx`/timeout), and `OPENROUTER_FIRST_TOKEN_TIMEOUT_MS` (`15_000` ms).
+
+### Decision 8: Daytona Tier-1 Proactive LRU Slot Manager (`managed` Sandboxes Only)
+- Tier-1 Daytona `eu` quotas allow `10 GiB` RAM and `30 GiB` active disk (`2 vCPU / 4 GiB RAM / 10 GiB disk` per default Kortix sandbox), with `9 GiB` reserved by 3 pre-existing unrelated `build-x` `error` sandboxes (`4c6e7026`, `8167c4a6`, `a2d9eeba`, `2026-09-27`, kept untouched).
+- `ensureDaytonaCapacitySlot` and `reclaimDaytonaDiskSlots` filter strictly on `sb.managed` (`labels['kortix.managed']`) and enforce `KORTIX_DAYTONA_MAX_RUNNING_SANDBOXES=2` and `KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES=2` alongside idle auto-stop (`5m`) and auto-archive (`5m`).
+
+### Decision 9: Mobile-Only Distribution & Direct Android APK Hosting
+- Replaced all desktop installer flows and App Store / Google Play badges across `apps/web` and `packages/ui` with a direct Android APK download (`kortix-latest.apk`, `89,572,194` bytes, hosted on public GitHub Release `MMUU6699/kortix-starter-workspace` tag `android-latest` due to Supabase Storage's 50 MB free-tier upload cap) plus a non-clickable `Coming Soon` / `قريباً` iOS badge.
+- Redirected `/desktop` -> `/download` and routed `/download/[platform]` strictly to `DIRECT_ANDROID_APK_URL` (`android` / Android QR scan) or `/download` (all others).
+- **Pre-Commit Hook Note on Windows**: Restoring `apps/web/translations/en.json` avoided CRLF drift against `apps/web/scripts/i18n-catalogs.mjs` across unrelated locales; `packages/ui/dist/styles.css` was rebuilt directly with `tailwindcss.cmd` (`gen-i18n-catalog.mjs --check` exits `0`).

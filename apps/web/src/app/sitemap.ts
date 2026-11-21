@@ -32,7 +32,6 @@ export const LOCALIZED_ROUTES = [
   '/sovereign',
   '/compliance',
   '/white-label',
-  '/desktop',
   '/mobile',
   '/slack',
   '/teams',

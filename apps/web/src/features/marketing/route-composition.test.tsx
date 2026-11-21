@@ -36,7 +36,6 @@ mock.module('@/lib/use-cases-source', () => ({
 // Dynamic imports, after the mocks: a static import is hoisted above
 // `mock.module`, so the real MDX content source loaded first and, under
 // `--isolate`, died on a circular import (`useCases` before initialization).
-const { default: DesktopPage } = await import('@/app/[locale]/(public)/(marketing)/desktop/page');
 const { default: Home } = await import('@/app/[locale]/(public)/(marketing)/(home)/page');
 const { default: CompliancePage } = await import('@/app/[locale]/(public)/(marketing)/compliance/page');
 const { default: EnterprisePage } = await import('@/app/[locale]/(public)/(marketing)/enterprise/page');
@@ -103,7 +102,6 @@ const SOLUTION_HERO_PAGES = [
   ['enterprise', EnterprisePage],
   ['multiplayer', MultiplayerPage],
   ['self-hosted', SelfHostedPage],
-  ['desktop', DesktopPage],
 ] as const;
 
 function projectHero(html: string) {

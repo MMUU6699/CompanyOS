@@ -9,7 +9,11 @@ import type { SandboxExecOptions, SandboxExecResult } from './contract';
 import { isProviderNotFound } from './status';
 import { SandboxState } from '@daytonaio/sdk';
 import { SANDBOX_VERSION, config } from '../../config';
-import { evictIdleRunningDaytonaSandboxes } from '../../projects/compute-quota-guard';
+import {
+  ensureDaytonaCapacitySlot,
+  evictIdleRunningDaytonaSandboxes,
+  reclaimDaytonaDiskSlots,
+} from '../../projects/compute-quota-guard';
 import { triggerEmergencyDiskArchiveSweep } from '../../projects/disk-quota-guard';
 import {
   archiveDaytonaSandboxById,
@@ -71,11 +75,97 @@ const diskQuotaGuardDeps = {
   archive: archiveDaytonaSandboxById,
 };
 
-const computeQuotaGuardDeps = {
+const slotManagerDeps = {
   listStarted: listStartedDaytonaSandboxesOldestFirst,
+  listStopped: listStoppedDaytonaSandboxesOldestFirst,
   stop: stopDaytonaSandboxById,
+  archive: archiveDaytonaSandboxById,
   getState: getDaytonaSandboxStateById,
 };
+
+function isTransientDaytonaWakeError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  const status = (err as { status?: number; response?: { status?: number } })?.status
+    ?? (err as { response?: { status?: number } })?.response?.status;
+  if (status === 429 || (status !== undefined && status >= 500)) return true;
+  return (
+    msg.includes('429') ||
+    msg.includes('throttler') ||
+    msg.includes('timed out') ||
+    msg.includes('timeout') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('502') ||
+    msg.includes('503') ||
+    msg.includes('504')
+  );
+}
+
+/**
+ * Proactive LRU slot check + reactive quota/transient retry wrapper shared by
+ * Daytona `create()` and `start()`.
+ */
+async function runWithDaytonaQuotaRetry<T>(
+  reason: string,
+  excludeExternalId: string | undefined,
+  op: () => Promise<T>,
+): Promise<T> {
+  await ensureDaytonaCapacitySlot(
+    reason,
+    slotManagerDeps,
+    {
+      maxRunning: config.KORTIX_DAYTONA_MAX_RUNNING_SANDBOXES,
+      maxNonArchived: config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES,
+    },
+    excludeExternalId,
+  ).catch((err: unknown) => {
+    console.warn(
+      `[DAYTONA] proactive LRU slot check (${reason}) skipped:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  });
+
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      if (attempt < maxAttempts) {
+        if (isDaytonaDiskQuotaError(err)) {
+          const reclaim = await reclaimDaytonaDiskSlots(
+            `${reason}:attempt-${attempt}`,
+            slotManagerDeps,
+            excludeExternalId,
+          );
+          if (reclaim.archivedIds.length > 0) {
+            for (const id of reclaim.archivedIds) runningStatusCache.delete(id);
+            continue;
+          }
+        } else if (isDaytonaComputeQuotaError(err)) {
+          const eviction = await evictIdleRunningDaytonaSandboxes(
+            `${reason}:attempt-${attempt}`,
+            slotManagerDeps,
+            excludeExternalId,
+          );
+          if (eviction.evictedIds.length > 0) {
+            for (const id of eviction.evictedIds) runningStatusCache.delete(id);
+            continue;
+          }
+        } else if (isTransientDaytonaWakeError(err)) {
+          const delayMs = attempt * 1_500;
+          console.warn(
+            `[DAYTONA] transient error on ${reason} (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`,
+            err instanceof Error ? err.message : String(err),
+          );
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
+        }
+      }
+      reportIfDiskQuotaError(err, reason);
+    }
+  }
+  throw new Error(`Daytona ${reason} exhausted retries`);
+}
 
 /**
  * Any Daytona create/resume call can hit the org-wide disk quota. Firing the
@@ -249,24 +339,7 @@ export class DaytonaProvider implements SandboxProvider {
     const runCreate = () =>
       daytona.create(createParams, { timeout: createTimeoutSeconds });
 
-    let daytonaSandbox;
-    try {
-      daytonaSandbox = await runCreate();
-    } catch (err) {
-      if (isDaytonaComputeQuotaError(err)) {
-        const eviction = await evictIdleRunningDaytonaSandboxes('create', computeQuotaGuardDeps);
-        if (eviction.evictedIds.length > 0) {
-          for (const evictedId of eviction.evictedIds) runningStatusCache.delete(evictedId);
-          daytonaSandbox = await runCreate().catch((retryErr) =>
-            reportIfDiskQuotaError(retryErr, 'create-after-evict'),
-          );
-        } else {
-          reportIfDiskQuotaError(err, 'create');
-        }
-      } else {
-        reportIfDiskQuotaError(err, 'create');
-      }
-    }
+    const daytonaSandbox = await runWithDaytonaQuotaRetry('create', undefined, runCreate);
 
     const externalId = daytonaSandbox.id;
     const apiBase = sandboxApiBase;
@@ -371,25 +444,7 @@ export class DaytonaProvider implements SandboxProvider {
         PROVIDER_CALL_TIMEOUT_MS,
         `Daytona start(${externalId})`,
       );
-    try {
-      await runStart();
-    } catch (err) {
-      if (isDaytonaComputeQuotaError(err)) {
-        const eviction = await evictIdleRunningDaytonaSandboxes(
-          `resume:${externalId}`,
-          computeQuotaGuardDeps,
-          externalId,
-        );
-        if (eviction.evictedIds.length > 0) {
-          for (const evictedId of eviction.evictedIds) runningStatusCache.delete(evictedId);
-          await runStart().catch((retryErr) =>
-            reportIfDiskQuotaError(retryErr, `resume-after-evict:${externalId}`),
-          );
-          return;
-        }
-      }
-      reportIfDiskQuotaError(err, `resume:${externalId}`);
-    }
+    await runWithDaytonaQuotaRetry(`resume:${externalId}`, externalId, runStart);
   }
 
   async renewLifecycle(externalId: string): Promise<void> {

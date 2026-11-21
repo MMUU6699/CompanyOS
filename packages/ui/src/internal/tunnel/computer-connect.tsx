@@ -18,7 +18,6 @@ import { Modal, ModalContent, ModalDescription, ModalTitle } from '../../primiti
 import { BeamsShader } from '../../primitives/paper-wallpaper-shaders';
 import { Switch } from '../../primitives/switch';
 import { errorToast, successToast } from '../../primitives/toast';
-import { Download } from '../icons/download';
 import { SolidCheckIcon } from '../icons/solid-check-icon';
 import { useUiViewerId } from '../../providers/ui-provider';
 import { tunnelKeys, useTunnelConnections, type TunnelConnection } from '@kortix/sdk/react';
@@ -27,9 +26,7 @@ import { useTranslations } from '../../i18n';
 import {
   desktopComputerConnect,
   desktopComputerStatus,
-  desktopDownloadUrl,
   isDesktop,
-  startDownload,
   type DesktopComputerStatus,
 } from '../lib/desktop';
 import { cn } from '../lib/utils';
@@ -544,7 +541,6 @@ function ComputerConnectOptions({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addedId]);
 
-  const inBrowser = desktop.isSuccess && !desktop.data && !isDesktop();
   // The CLI fallback is one click: it copies the pairing command. The command
   // prints its own instructions when it runs.
   // The button itself confirms the copy; no toast.
@@ -579,15 +575,9 @@ function ComputerConnectOptions({
             {connectDesktop.isPending ? t('connecting') : t('connectThisComputer')}
           </Button>
         ) : null}
-        {inBrowser ? (
-          <Button size="lg" className="w-full" onClick={() => startDownload(desktopDownloadUrl())}>
-            <Download className="shrink-0" />
-            {t('downloadDesktop')}
-          </Button>
-        ) : null}
-        {/* The CLI is the alternative: a quiet text action under the primary
-            one. It is the only action where the desktop app cannot pair. */}
-        {oneClick || inBrowser ? (
+        {/* The CLI is the alternative: a quiet text action under the one-click
+            action, or primary when connecting from the browser. */}
+        {oneClick ? (
           <div className="flex justify-center">
             <Button
               variant="ghost"

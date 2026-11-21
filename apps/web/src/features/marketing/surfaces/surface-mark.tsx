@@ -6,11 +6,12 @@ import {
   TerminalWindowIcon,
 } from '@phosphor-icons/react/dist/ssr';
 
-import { AppleLogo, AppStoreLogo, GooglePlayLogo, LinuxLogo, WindowsLogo } from './os-logos';
+import { AndroidLogo, AppleLogo, AppStoreLogo, GooglePlayLogo, LinuxLogo, WindowsLogo } from './os-logos';
 
 export type MarkId =
   | 'desktop'
   | 'mobile'
+  | 'android'
   | 'cli'
   | 'slack'
   | 'teams'
@@ -28,6 +29,8 @@ export function SurfaceMark({ id, className = 'size-4' }: { id: MarkId; classNam
       return <DesktopIcon aria-hidden className={className} />;
     case 'mobile':
       return <DeviceMobileIcon aria-hidden className={className} />;
+    case 'android':
+      return <AndroidLogo className={className} />;
     case 'cli':
       return <TerminalWindowIcon aria-hidden className={className} />;
     case 'slack':

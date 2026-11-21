@@ -137,8 +137,11 @@ export function isDaytonaDiskQuotaError(err: unknown): boolean {
 /**
  * Matches Daytona org-wide compute/concurrency quota errors (e.g. "Total memory
  * limit exceeded. Maximum allowed: 10GiB." or "Total CPU limit exceeded").
+ * Explicitly excludes disk quota errors (which also include the footer
+ * "To increase concurrency limits...").
  */
 export function isDaytonaComputeQuotaError(err: unknown): boolean {
+  if (isDaytonaDiskQuotaError(err)) return false;
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
   return (
     msg.includes('total memory limit exceeded') ||
@@ -154,12 +157,13 @@ export interface DaytonaStartedSandboxSummary {
   cpu: number;
   lastActivityAt: string | null;
   createdAt: string | null;
+  managed: boolean;
 }
 
 /**
  * List org-wide STARTED Daytona sandboxes, oldest activity first, so the
- * compute-quota guard can evict idle running sandboxes when RAM/CPU hits the
- * org tier cap (e.g. 10 GiB = max 2 × 4 GiB sandboxes).
+ * compute-quota guard can evict idle Kortix sandboxes when RAM/CPU hits the
+ * org tier cap (e.g. 10 GiB = max 2 x 4 GiB sandboxes).
  */
 export async function listStartedDaytonaSandboxesOldestFirst(
   maxItems: number,
@@ -189,6 +193,7 @@ export async function listStartedDaytonaSandboxesOldestFirst(
         cpu?: number;
         lastActivityAt?: string;
         createdAt?: string;
+        labels?: Record<string, string>;
       }>;
       nextCursor?: string | null;
     };
@@ -200,6 +205,7 @@ export async function listStartedDaytonaSandboxesOldestFirst(
         cpu: it.cpu ?? 2,
         lastActivityAt: it.lastActivityAt ?? null,
         createdAt: it.createdAt ?? null,
+        managed: Boolean(it.labels?.['kortix.managed']),
       });
       if (out.length >= maxItems) break;
     }
@@ -247,6 +253,7 @@ export interface DaytonaStoppedSandboxSummary {
   id: string;
   disk: number;
   lastActivityAt: string | null;
+  managed?: boolean;
 }
 
 /**
@@ -278,12 +285,17 @@ export async function listStoppedDaytonaSandboxesOldestFirst(
       throw new Error(`Daytona list sandboxes failed: HTTP ${res.status}`);
     }
     const body = (await res.json()) as {
-      items?: Array<{ id: string; disk?: number; lastActivityAt?: string }>;
+      items?: Array<{ id: string; disk?: number; lastActivityAt?: string; labels?: Record<string, string> }>;
       nextCursor?: string | null;
     };
     const items = body.items ?? [];
     for (const it of items) {
-      out.push({ id: it.id, disk: it.disk ?? 0, lastActivityAt: it.lastActivityAt ?? null });
+      out.push({
+        id: it.id,
+        disk: it.disk ?? 0,
+        lastActivityAt: it.lastActivityAt ?? null,
+        managed: Boolean(it.labels?.['kortix.managed']),
+      });
       if (out.length >= maxItems) break;
     }
     cursor = body.nextCursor ?? null;

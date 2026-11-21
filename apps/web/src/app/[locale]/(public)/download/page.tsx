@@ -1,19 +1,9 @@
 import { ConsentGate } from '@/components/consent-gate';
 import { DownloadCloseButton } from '@/features/marketing/download/close-button';
 import { localizedDownloadContent } from '@/features/marketing/download/content';
-import type { DesktopOs } from '@kortix/ui/internal/lib/detect-os';
-import {
-  DESKTOP_ORDER,
-  detectPlatform,
-  normalizePlatform,
-} from '@kortix/ui/internal/lib/detect-os';
+import { detectPlatform, normalizePlatform } from '@kortix/ui/internal/lib/detect-os';
 import { DownloadOptions } from '@/features/marketing/download/download-options';
-import {
-  formatSize,
-  getDesktopRelease,
-  pickDesktopAsset,
-} from '@/features/marketing/download/releases';
-import { getTranslations } from '@/i18n/get-translations';
+import { getLocale, getTranslations } from '@/i18n/get-translations';
 import { localizedMarketingMetadata } from '@/lib/seo/metadata';
 import type { Metadata } from 'next';
 import { headers } from 'next/headers';
@@ -27,22 +17,13 @@ export default async function DownloadPage({
 }: {
   searchParams: Promise<{ platform?: string }>;
 }) {
-  const [headerList, params, release, tI18nComplete] = await Promise.all([
+  const [headerList, params, locale, tI18nComplete] = await Promise.all([
     headers(),
     searchParams,
-    getDesktopRelease(),
+    getLocale(),
     getTranslations('hardcodedUi.i18nComplete'),
   ]);
   const { hero } = localizedDownloadContent(tI18nComplete);
-
-  // The size drops out of the meta line when GitHub is unreachable. Never a
-  // placeholder, never a stale number.
-  const sizes: Partial<Record<DesktopOs, string>> = {};
-  if (release) {
-    for (const os of DESKTOP_ORDER) {
-      sizes[os] = formatSize(pickDesktopAsset(release.assets, os)?.size ?? 0);
-    }
-  }
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-5xl flex-col justify-center px-6 py-16">
@@ -62,7 +43,7 @@ export default async function DownloadPage({
         detected={
           normalizePlatform(params.platform) ?? detectPlatform(headerList.get('user-agent'))
         }
-        sizes={sizes}
+        locale={locale}
       />
     </main>
   );

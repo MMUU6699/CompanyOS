@@ -15,7 +15,9 @@ export function MobileQrRow() {
       <MobileStoreQr />
       <div className="min-w-0">
         <p className="text-foreground text-sm font-medium">{t('scanTitle')}</p>
-        <p className="text-muted-foreground mt-1 text-xs text-balance">{t('scanDescription')}</p>
+        <p className="text-muted-foreground mt-1 text-xs text-balance">
+          Point your phone&apos;s camera at the code to open mobile downloads.
+        </p>
       </div>
     </div>
   );

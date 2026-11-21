@@ -2,13 +2,13 @@
 
 import { Badge } from '../../primitives/badge';
 import { Modal, ModalContent, ModalDescription, ModalTitle } from '../../primitives/modal';
-import { APP_STORE_URL, GOOGLE_PLAY_URL } from '../../internal/lib/mobile-store-urls';
+import { DIRECT_ANDROID_APK_FILENAME, DIRECT_ANDROID_APK_URL } from '../../internal/lib/mobile-store-urls';
 import { useTranslations } from '../../i18n';
 import { useMobileAppPromoStore } from '../../internal/stores/mobile-app-promo-store';
 import { MobileStoreQr } from '../../internal/components/mobile-store-qr';
 import { PROMO_GRADIENT } from '../../internal/lib/promo-art';
-import { BellIcon, ChatCircleIcon, MicrophoneIcon, type Icon } from '@phosphor-icons/react';
-import { UiLink as Link, UiImage as Image } from '../../providers/ui-provider';
+import { BellIcon, ChatCircleIcon, DownloadSimpleIcon, MicrophoneIcon, type Icon } from '@phosphor-icons/react';
+import { UiImage as Image } from '../../providers/ui-provider';
 import { useSyncExternalStore } from 'react';
 import { useIsMobile } from '../../hooks/use-mobile';
 
@@ -28,15 +28,9 @@ const FEATURES: readonly { key: 'sessions' | 'notifications' | 'dictation'; icon
 const SMOOTH_SHADOW_LG = '0 25px 50px 0 rgba(0, 0, 0, 0.05), 0 12px 24px 0 rgba(0, 0, 0, 0.04), 0 6px 12px 0 rgba(0, 0, 0, 0.03), 0 3px 6px 0 rgba(0, 0, 0, 0.02), 0 1.5px 3px 0 rgba(0, 0, 0, 0.02)';
 
 
-/** The official store badges, unmodified (Apple and Google forbid edits). Both are 3.375:1, so one height gives one width. */
 /** Laid over the whole art panel: fades the card, border included, into the black floor. */
 // prettier-ignore
 const SCREEN_FADE = 'linear-gradient(to bottom in oklab, transparent 45%, #000 95%)';
-
-const STORES = [
-  { key: 'appStore', badge: '/images/store-badges/app-store.svg', href: APP_STORE_URL },
-  { key: 'googlePlay', badge: '/images/store-badges/google-play.svg', href: GOOGLE_PLAY_URL },
-] as const;
 
 /** Nothing to subscribe to: false on the server, true once mounted. */
 const subscribeToNothing = () => () => { };
@@ -142,22 +136,27 @@ export function MobileAppPromo() {
                 <MobileStoreQr />
                 <div className="min-w-0 space-y-1">
                   <p className="text-sm font-medium">{t('scanTitle')}</p>
-                  <p className="text-muted-foreground text-xs text-pretty">{t('scanDescription')}</p>
+                  <p className="text-muted-foreground text-xs text-pretty">
+                    Point your phone&apos;s camera at the code to open mobile downloads.
+                  </p>
                 </div>
               </div>
-              <div className="flex flex-wrap gap-2">
-                {STORES.map(({ key, badge, href }) => (
-                  <Link
-                    key={key}
-                    href={href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={close}
-                    className="focus-visible:ring-ring rounded-md transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:outline-none"
-                  >
-                    <Image src={badge} alt={t(key)} width={135} height={40} className="h-11 w-auto" />
-                  </Link>
-                ))}
+              <div className="flex flex-wrap items-center gap-2.5">
+                <a
+                  href={DIRECT_ANDROID_APK_URL}
+                  download={DIRECT_ANDROID_APK_FILENAME}
+                  onClick={close}
+                  className="bg-foreground text-background focus-visible:ring-ring inline-flex h-10 items-center gap-2 rounded-md px-4 text-sm font-medium transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:outline-none"
+                >
+                  <DownloadSimpleIcon className="size-4 shrink-0" />
+                  <span>Download APK (Android)</span>
+                </a>
+                <span
+                  aria-disabled="true"
+                  className="border-border text-muted-foreground inline-flex h-10 cursor-default items-center rounded-md border px-3.5 text-sm font-medium select-none"
+                >
+                  iOS · Coming Soon
+                </span>
               </div>
             </div>
           </div>

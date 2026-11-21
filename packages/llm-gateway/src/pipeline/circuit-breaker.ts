@@ -62,6 +62,16 @@ export function tripsBreaker(status: number | undefined): boolean {
   return status >= 500 || status === 408 || status === 409 || status === 425 || status === 429;
 }
 
+/**
+ * OpenRouter free-tier breaker policy: `:free` slugs frequently rotate (`404`),
+ * hit temporary shared capacity limits (`429`), time out (`408`/`504`), or
+ * emit malformed/empty streams (`502`). Trip on ANY of those.
+ */
+export function tripsOpenRouterBreaker(status: number | undefined): boolean {
+  if (status === undefined) return true;
+  return status === 404 || tripsBreaker(status);
+}
+
 // A credential with no stored reference (a deployment key, a custom endpoint's
 // key) is told apart by a per-process number, never by anything derived from
 // the secret. replica-local: bounded; a reset only restarts breaker history.
@@ -209,3 +219,18 @@ export class CircuitBreakers {
 
 /** The gateway process's breakers. replica-local: each gateway task learns on its own. */
 export const upstreamBreakers = new CircuitBreakers();
+
+/**
+ * Dedicated aggressive circuit breaker for OpenRouter `:free` models:
+ * 1st failure (`429`, `404`, `5xx`, 15s first-token timeout, empty stream,
+ * or malformed tool call) immediately opens the circuit for 5 minutes so
+ * subsequent requests jump straight to the next healthy `:free` model.
+ */
+export const openRouterFreeBreakers = new CircuitBreakers({
+  consecutiveFailures: 1,
+  failureRatio: 0.5,
+  minRequests: 2,
+  windowMs: 60_000,
+  cooldownMs: 5 * 60_000,
+  maxCooldownMs: 10 * 60_000,
+});

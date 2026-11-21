@@ -15,57 +15,43 @@
  *     terminal block says "macOS & Linux · WSL on Windows".
  *  4. The Chrome extension (apps/chrome-extension) is not public in the
  *     Chrome Web Store yet. The page must not advertise it until it is.
- *  5. Both mobile apps are public: iOS on the App Store, Android on Google
- *     Play. The rows link the store listings — see MOBILE_ROWS.
+ *  5. Mobile-only release: Android is distributed as a direct APK download
+ *     from our verified release host, and iOS is marked Coming Soon.
  */
 
 import { localizeUiCatalog } from '@kortix/ui/i18n';
 import { REMAINING_UI_TRANSLATION_KEYS } from '@kortix/ui/i18n/ui-catalog/remaining-ui-translation-keys.generated';
 import type { UiTranslator } from '@/i18n/translator';
-import type { DesktopOs, MobileOs } from '@kortix/ui/internal/lib/detect-os';
-import { APP_STORE_URL, GOOGLE_PLAY_URL } from '@kortix/ui/internal/lib/mobile-store-urls';
+import type { MobileOs } from '@kortix/ui/internal/lib/detect-os';
+import {
+  DIRECT_ANDROID_APK_SIZE_LABEL,
+  DIRECT_ANDROID_APK_URL,
+} from '@kortix/ui/internal/lib/mobile-store-urls';
 
 export const hero = {
   title: 'Download Kortix',
-  sub: 'Get the app for your desktop, your phone, or your terminal.',
+  sub: 'Download the Kortix Android app directly via APK. iOS support is coming soon.',
 };
 
 export type CardCopy = { title: string; description: string };
 export type RowCopy = { label: string; hint: string; href: string };
 
-export const DESKTOP_CARD: CardCopy = {
-  title: 'Desktop app',
-  description: 'Run Kortix on your own machine, with your files and your terminal.',
-};
-
 export const MOBILE_CARD: CardCopy = {
   title: 'Mobile app',
-  description: 'Start a session anywhere and pick up where you left off.',
+  description: 'Start a session on your phone and pick up where you left off.',
 };
 
-/**
- * `hint` is the line under the label, and it carries copy ONLY. The live
- * download size is appended at render from the GitHub release, so when that API
- * is unreachable the size disappears instead of printing a stale or invented
- * number.
- */
-export const DESKTOP_ROWS: Record<DesktopOs, RowCopy> = {
-  macos: { label: 'macOS', hint: 'Universal', href: '/download/macos' },
-  windows: { label: 'Windows', hint: '64-bit', href: '/download/windows' },
-  linux: { label: 'Linux', hint: 'AppImage · x86_64', href: '/download/linux' },
-};
-
-/** Store URLs live in `mobile-store-urls.ts`. */
+/** Direct mobile APK link and iOS availability copy. */
 export const MOBILE_ROWS: Record<MobileOs, RowCopy> = {
-  ios: {
-    label: 'iPhone and iPad',
-    hint: 'App Store',
-    href: APP_STORE_URL,
-  },
   android: {
     label: 'Android',
-    hint: 'Google Play',
-    href: GOOGLE_PLAY_URL,
+    hint: `Direct APK · ${DIRECT_ANDROID_APK_SIZE_LABEL} · arm64`,
+    href: DIRECT_ANDROID_APK_URL,
+  },
+  ios: {
+    label: 'iPhone and iPad',
+    hint: 'iOS',
+    href: '',
   },
 };
 
@@ -79,9 +65,7 @@ export function localizedDownloadContent(tI18nComplete: UiTranslator) {
   return localizeUiCatalog(
     {
       hero,
-      desktopCard: DESKTOP_CARD,
       mobileCard: MOBILE_CARD,
-      desktopRows: DESKTOP_ROWS,
       mobileRows: MOBILE_ROWS,
       terminal: TERMINAL,
     },

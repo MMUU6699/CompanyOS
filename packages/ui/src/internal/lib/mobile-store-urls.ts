@@ -1,9 +1,12 @@
 /**
- * Canonical store URLs: no storefront country (`/cg/`) and no `hl=` locale.
- * Each store picks the visitor's own region and language. Its own module so
- * the project page's mobile-app introduction reads them without pulling the
- * download page's catalog into the app chunk.
+ * Direct mobile distribution constants (Mobile-Only APK + iOS Coming Soon).
+ * All App Store / Google Play / desktop installer URLs are removed.
  */
-export const APP_STORE_URL = 'https://apps.apple.com/app/kortix/id6754448524';
-export const GOOGLE_PLAY_URL =
-  'https://play.google.com/store/apps/details?id=com.kortix.application';
+export const DIRECT_ANDROID_APK_URL =
+  'https://github.com/MMUU6699/kortix-starter-workspace/releases/download/android-latest/kortix-latest.apk';
+export const DIRECT_ANDROID_APK_FILENAME = 'kortix-latest.apk';
+export const DIRECT_ANDROID_APK_SIZE_LABEL = '85.4 MB';
+
+/** Legacy exports kept mapped away from external stores for import compatibility. */
+export const GOOGLE_PLAY_URL = '/download/android';
+export const APP_STORE_URL = '/download';

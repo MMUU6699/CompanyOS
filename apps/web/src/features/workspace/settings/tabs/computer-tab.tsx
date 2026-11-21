@@ -22,7 +22,6 @@ import { Button } from '@kortix/ui/button';
 import Loading from '@kortix/ui/loading';
 import { SettingsRow, SettingsRowGroup } from '@kortix/ui/settings-row';
 import { SettingsSubsectionHeader } from '@kortix/ui/settings-subsection-header';
-import { Download } from '@kortix/ui/internal/icons/download';
 import { SolidCheckIcon } from '@kortix/ui/internal/icons/solid-check-icon';
 import {
   ComputerCapabilities,
@@ -38,7 +37,6 @@ import { ComputerDetailsModal } from '@/features/tunnel/local-computer-modal';
 import { buildTunnelConnectCommand } from '@kortix/ui/internal/tunnel/tunnel-connect-command';
 import { useCopy } from '@kortix/ui/internal/hooks/use-copy';
 import { useTranslations } from '@/i18n/use-translations';
-import { desktopDownloadUrl, isDesktop, startDownload } from '@kortix/ui/internal/lib/desktop';
 import { getEnv } from '@/lib/env-config';
 
 import { SettingsTabHeader } from '@kortix/ui/customize/settings/settings-tab-header';
@@ -47,15 +45,12 @@ export function ComputerTab({ projectId }: { projectId: string }) {
   const t = useTranslations('computers');
   const tPage = useTranslations('settings.computer');
   const paired = useOwnsPairedComputer();
-  const { desktop, oneClick, stale, tunnelId } = useThisComputerState();
+  const { oneClick, stale, tunnelId } = useThisComputerState();
   const connectDesktop = useConnectDesktopComputer(projectId);
   // The button itself confirms the copy; no toast.
   const { copied, copy } = useCopy({ toast: false });
   const [openTunnelId, setOpenTunnelId] = useState<string | null>(null);
 
-  // The desktop app connects the machine it runs on in one click. Elsewhere,
-  // and for any other computer, the way in is the desktop app on that machine.
-  const showDownload = (desktop.isSuccess && !desktop.data && !isDesktop()) || paired.owns;
   const copyCliCommand = () =>
     copy(
       buildTunnelConnectCommand({
@@ -125,22 +120,6 @@ export function ComputerTab({ projectId }: { projectId: string }) {
                   <MonitorIcon className="size-3.5 shrink-0" />
                 )}
                 {connectDesktop.isPending ? t('connecting') : t('connectThisComputer')}
-              </Button>
-            </SettingsRow>
-          ) : null}
-          {showDownload ? (
-            <SettingsRow
-              label={tPage('desktopLabel')}
-              description={paired.owns ? tPage('otherComputerHint') : t('downloadHint')}
-            >
-              <Button
-                type="button"
-                size="sm"
-                className="gap-1.5"
-                onClick={() => startDownload(desktopDownloadUrl())}
-              >
-                <Download className="size-3.5 shrink-0" />
-                {tPage('download')}
               </Button>
             </SettingsRow>
           ) : null}

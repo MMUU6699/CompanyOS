@@ -1,25 +1,29 @@
 /**
- * Reactive Daytona compute-quota guard (RAM / CPU / concurrency limits).
+ * Reactive and proactive Daytona capacity & LRU concurrency slot manager.
  *
- * When a Daytona org has a tight concurrent memory cap (e.g. 10 GiB = max 2
- * running 4 GiB sandboxes), opening a 3rd session or waking a stopped session
- * fails immediately with `Total memory limit exceeded. Maximum allowed: 10GiB.`
- *
- * When that error occurs on create() or start(), this guard lists currently
- * STARTED Daytona sandboxes (oldest activity first), checks `session_sandboxes`
- * for active turns, stops the oldest idle running box(es), waits until Daytona
- * releases the RAM slot, marks their DB rows `stopped`, and lets the caller
- * retry seamlessly.
+ * Keeps Kortix within Tier-1 Daytona quotas (10 GiB RAM / 30 GiB active disk):
+ *  - Only touches Kortix-managed sandboxes (`sb.managed === true`), never unrelated projects.
+ *  - Proactive LRU guard (`ensureDaytonaCapacitySlot`): before creating/waking a
+ *    sandbox, gracefully stops excess idle running sandboxes above `maxRunning - 1`
+ *    and archives excess stopped sandboxes above `maxNonArchived - 1`.
+ *  - Reactive compute eviction (`evictIdleRunningDaytonaSandboxes`): frees RAM/CPU
+ *    slots when Daytona rejects with `Total memory/CPU limit exceeded`.
+ *  - Reactive disk reclaim (`reclaimDaytonaDiskSlots`): archives stopped Kortix
+ *    sandboxes (or stops + archives LRU idle running box if none stopped) and waits
+ *    for Daytona to confirm `archived` before retrying on `Total disk limit exceeded`.
  */
 
-import { inArray, eq } from 'drizzle-orm';
+import { inArray } from 'drizzle-orm';
 import { sessionSandboxes } from '@kortix/db';
 import { db, hasDatabase } from '../shared/db';
-import type { DaytonaStartedSandboxSummary } from '../shared/daytona';
+import type {
+  DaytonaStartedSandboxSummary,
+  DaytonaStoppedSandboxSummary,
+} from '../shared/daytona';
 
 const ACTIVE_TURN_FRESHNESS_MS = 10 * 60_000;
-const STOP_WAIT_TIMEOUT_MS = 12_000;
-const STOP_WAIT_POLL_MS = 500;
+const STATE_WAIT_TIMEOUT_MS = 15_000;
+const STATE_WAIT_POLL_MS = 500;
 const MAX_EVICT_PER_PASS = 2;
 
 export interface ComputeQuotaEvictionResult {
@@ -28,10 +32,21 @@ export interface ComputeQuotaEvictionResult {
   freedMemoryGb: number;
 }
 
+export interface DiskSlotReclaimResult {
+  stoppedCount: number;
+  archivedIds: string[];
+  freedDiskGb: number;
+}
+
 export interface ComputeQuotaGuardDeps {
   listStarted: (maxItems: number) => Promise<DaytonaStartedSandboxSummary[]>;
   stop: (id: string) => Promise<boolean>;
   getState: (id: string) => Promise<string | null>;
+}
+
+export interface DaytonaSlotManagerDeps extends ComputeQuotaGuardDeps {
+  listStopped: (maxItems: number) => Promise<DaytonaStoppedSandboxSummary[]>;
+  archive: (id: string) => Promise<boolean>;
 }
 
 interface SandboxActivityRow {
@@ -52,7 +67,6 @@ function hasFreshActiveTurn(row: SandboxActivityRow | undefined, nowMs: number):
     if (!entry || typeof entry !== 'object') continue;
     const startedAtMs = Number((entry as { startedAtMs?: unknown }).startedAtMs ?? 0);
     if (!Number.isFinite(startedAtMs) || startedAtMs <= 0) {
-      // Unknown timestamp: trust updated_at recency.
       if (row.updatedAt && nowMs - row.updatedAt.getTime() < ACTIVE_TURN_FRESHNESS_MS) return true;
       continue;
     }
@@ -61,17 +75,16 @@ function hasFreshActiveTurn(row: SandboxActivityRow | undefined, nowMs: number):
   return false;
 }
 
-async function waitUntilStopped(
+async function waitUntilState(
   id: string,
   getState: (id: string) => Promise<string | null>,
+  targets: readonly string[],
 ): Promise<void> {
-  const deadline = Date.now() + STOP_WAIT_TIMEOUT_MS;
+  const deadline = Date.now() + STATE_WAIT_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const state = await getState(id);
-    if (!state || state === 'stopped' || state === 'archived' || state === 'destroyed') {
-      return;
-    }
-    await new Promise((r) => setTimeout(r, STOP_WAIT_POLL_MS));
+    if (!state || targets.includes(state)) return;
+    await new Promise((r) => setTimeout(r, STATE_WAIT_POLL_MS));
   }
 }
 
@@ -84,7 +97,7 @@ async function markStoppedInDb(externalIds: string[]): Promise<void> {
       .where(inArray(sessionSandboxes.externalId, externalIds));
   } catch (err) {
     console.warn(
-      '[daytona-compute-quota] failed to mark evicted sandboxes stopped in DB:',
+      '[daytona-slot-manager] failed to mark evicted sandboxes stopped in DB:',
       err instanceof Error ? err.message : String(err),
     );
   }
@@ -113,80 +126,230 @@ async function loadSandboxRows(externalIds: string[]): Promise<Map<string, Sandb
     }
   } catch (err) {
     console.warn(
-      '[daytona-compute-quota] failed to query session_sandboxes activity:',
+      '[daytona-slot-manager] failed to query session_sandboxes activity:',
       err instanceof Error ? err.message : String(err),
     );
   }
   return map;
 }
 
-let inFlight: Promise<ComputeQuotaEvictionResult> | null = null;
+async function stopSandboxesLru(
+  candidates: DaytonaStartedSandboxSummary[],
+  count: number,
+  reason: string,
+  deps: Pick<ComputeQuotaGuardDeps, 'stop' | 'getState'>,
+): Promise<{ evictedIds: string[]; freedMemoryGb: number }> {
+  if (count <= 0 || candidates.length === 0) {
+    return { evictedIds: [], freedMemoryGb: 0 };
+  }
+  const nowMs = Date.now();
+  const dbRows = await loadSandboxRows(candidates.map((sb) => sb.id));
+  const idle = candidates.filter((sb) => !hasFreshActiveTurn(dbRows.get(sb.id), nowMs));
+  const busy = candidates.filter((sb) => hasFreshActiveTurn(dbRows.get(sb.id), nowMs));
+  const ordered = [...idle, ...busy].slice(0, count);
+
+  const evictedIds: string[] = [];
+  let freedMemoryGb = 0;
+  for (const target of ordered) {
+    console.warn(
+      `[daytona-slot-manager] stopping LRU Kortix sandbox ${target.id} (${reason}, ` +
+        `mem=${target.memory}GiB, lastActivityAt=${target.lastActivityAt ?? 'unknown'})`,
+    );
+    const stopped = await deps.stop(target.id);
+    if (stopped) {
+      await waitUntilState(target.id, deps.getState, ['stopped', 'archived', 'destroyed']);
+      evictedIds.push(target.id);
+      freedMemoryGb += target.memory || 4;
+    }
+  }
+  if (evictedIds.length > 0) {
+    await markStoppedInDb(evictedIds);
+  }
+  return { evictedIds, freedMemoryGb };
+}
+
+async function archiveSandboxesLru(
+  candidates: DaytonaStoppedSandboxSummary[],
+  count: number,
+  reason: string,
+  deps: Pick<DaytonaSlotManagerDeps, 'archive' | 'getState'>,
+): Promise<{ archivedIds: string[]; freedDiskGb: number }> {
+  if (count <= 0 || candidates.length === 0) {
+    return { archivedIds: [], freedDiskGb: 0 };
+  }
+  const targets = candidates.slice(0, count);
+  const archivedIds: string[] = [];
+  let freedDiskGb = 0;
+  for (const target of targets) {
+    console.warn(
+      `[daytona-slot-manager] archiving stopped Kortix sandbox ${target.id} (${reason}, ` +
+        `disk=${target.disk}GiB, lastActivityAt=${target.lastActivityAt ?? 'unknown'})`,
+    );
+    const ok = await deps.archive(target.id);
+    if (ok) {
+      await waitUntilState(target.id, deps.getState, ['archived', 'destroyed']);
+      archivedIds.push(target.id);
+      freedDiskGb += target.disk || 10;
+    }
+  }
+  if (archivedIds.length > 0) {
+    await markStoppedInDb(archivedIds);
+  }
+  return { archivedIds, freedDiskGb };
+}
+
+let inFlightCompute: Promise<ComputeQuotaEvictionResult> | null = null;
+let inFlightDisk: Promise<DiskSlotReclaimResult> | null = null;
+let inFlightCapacity: Promise<void> | null = null;
 
 /**
- * Single-flight eviction pass: stops the oldest idle running Daytona sandbox(es)
- * (excluding `excludeExternalId`) and waits for Daytona to release their RAM.
+ * Single-flight reactive eviction: stops the oldest idle running Kortix
+ * sandbox(es) (excluding `excludeExternalId`) and waits for RAM release.
  */
 export function evictIdleRunningDaytonaSandboxes(
   reason: string,
   deps: ComputeQuotaGuardDeps,
   excludeExternalId?: string,
 ): Promise<ComputeQuotaEvictionResult> {
-  if (inFlight) return inFlight;
+  if (inFlightCompute) return inFlightCompute;
 
   const run = (async (): Promise<ComputeQuotaEvictionResult> => {
-    const started = await deps.listStarted(50);
-    const eligible = started.filter((sb) => sb.id !== excludeExternalId);
+    const startedAll = await deps.listStarted(50);
+    const eligible = startedAll.filter((sb) => sb.managed && sb.id !== excludeExternalId);
     if (eligible.length === 0) {
       console.warn(
-        `[daytona-compute-quota] quota hit (${reason}) but 0 other started sandboxes found to evict`,
+        `[daytona-slot-manager] compute quota hit (${reason}) — 0 eligible started Kortix sandboxes to evict`,
       );
-      return { runningCount: started.length, evictedIds: [], freedMemoryGb: 0 };
+      return { runningCount: startedAll.length, evictedIds: [], freedMemoryGb: 0 };
     }
-
-    const nowMs = Date.now();
-    const dbRows = await loadSandboxRows(eligible.map((sb) => sb.id));
-
-    // Prefer idle or orphaned boxes (no fresh active turn).
-    const idle = eligible.filter((sb) => !hasFreshActiveTurn(dbRows.get(sb.id), nowMs));
-    // If every running box appears busy and >= 2 boxes are holding the org cap,
-    // still evict the single oldest box so new sessions are never permanently wedged.
-    const targets =
-      idle.length > 0
-        ? idle.slice(0, MAX_EVICT_PER_PASS)
-        : eligible.slice(0, 1);
-
-    const evictedIds: string[] = [];
-    let freedMemoryGb = 0;
-
-    for (const target of targets) {
-      console.warn(
-        `[daytona-compute-quota] quota hit (${reason}) — stopping idle sandbox ${target.id} ` +
-          `(memory=${target.memory}GiB lastActivityAt=${target.lastActivityAt ?? 'unknown'})`,
-      );
-      const stopped = await deps.stop(target.id);
-      if (stopped) {
-        await waitUntilStopped(target.id, deps.getState);
-        evictedIds.push(target.id);
-        freedMemoryGb += target.memory || 4;
-      }
-    }
-
-    if (evictedIds.length > 0) {
-      await markStoppedInDb(evictedIds);
-      console.warn(
-        `[daytona-compute-quota] eviction complete (${reason}): stopped=${evictedIds.length} ` +
-          `freed~${freedMemoryGb}GiB ids=[${evictedIds.join(',')}]`,
-      );
-    }
-
-    return { runningCount: started.length, evictedIds, freedMemoryGb };
+    const { evictedIds, freedMemoryGb } = await stopSandboxesLru(
+      eligible,
+      MAX_EVICT_PER_PASS,
+      `compute-quota:${reason}`,
+      deps,
+    );
+    return { runningCount: startedAll.length, evictedIds, freedMemoryGb };
   })().finally(() => {
-    inFlight = null;
+    inFlightCompute = null;
   });
 
-  inFlight = run;
+  inFlightCompute = run;
   return run;
 }
 
-// Keep unused import guard clean if eq is removed later
-void eq;
+/**
+ * Single-flight reactive disk reclaim: archives stopped Kortix sandboxes
+ * (and waits until Daytona confirms `archived`) so active storage drops before
+ * retrying create/start. If no stopped Kortix box exists, stops and archives
+ * the oldest idle running Kortix box.
+ */
+export function reclaimDaytonaDiskSlots(
+  reason: string,
+  deps: DaytonaSlotManagerDeps,
+  excludeExternalId?: string,
+  maxToArchive = MAX_EVICT_PER_PASS,
+): Promise<DiskSlotReclaimResult> {
+  if (inFlightDisk) return inFlightDisk;
+
+  const run = (async (): Promise<DiskSlotReclaimResult> => {
+    const stoppedAll = await deps.listStopped(50);
+    const stoppedKortix = stoppedAll.filter(
+      (sb) => sb.managed !== false && sb.id !== excludeExternalId,
+    );
+    if (stoppedKortix.length > 0) {
+      const { archivedIds, freedDiskGb } = await archiveSandboxesLru(
+        stoppedKortix,
+        maxToArchive,
+        `disk-quota:${reason}`,
+        deps,
+      );
+      return { stoppedCount: stoppedAll.length, archivedIds, freedDiskGb };
+    }
+
+    // No stopped Kortix boxes left to archive: stop + archive the oldest idle running Kortix box.
+    const startedAll = await deps.listStarted(50);
+    const runningKortix = startedAll.filter((sb) => sb.managed && sb.id !== excludeExternalId);
+    if (runningKortix.length === 0) {
+      console.warn(
+        `[daytona-slot-manager] disk quota hit (${reason}) — 0 Kortix sandboxes available to archive`,
+      );
+      return { stoppedCount: 0, archivedIds: [], freedDiskGb: 0 };
+    }
+    const stoppedRes = await stopSandboxesLru(runningKortix, 1, `disk-quota-stop:${reason}`, deps);
+    if (stoppedRes.evictedIds.length === 0) {
+      return { stoppedCount: 0, archivedIds: [], freedDiskGb: 0 };
+    }
+    const { archivedIds, freedDiskGb } = await archiveSandboxesLru(
+      stoppedRes.evictedIds.map((id) => ({ id, disk: 10, lastActivityAt: null, managed: true })),
+      1,
+      `disk-quota-archive:${reason}`,
+      deps,
+    );
+    return { stoppedCount: stoppedRes.evictedIds.length, archivedIds, freedDiskGb };
+  })().finally(() => {
+    inFlightDisk = null;
+  });
+
+  inFlightDisk = run;
+  return run;
+}
+
+/**
+ * Proactive LRU slot manager called before creating or waking a sandbox:
+ * keeps running Kortix boxes strictly < `maxRunning` (stopping LRU idle first)
+ * and keeps non-archived Kortix boxes (running + stopped) strictly < `maxNonArchived`
+ * (archiving LRU stopped first) so switching across 2-3+ chats never hits quota.
+ */
+export function ensureDaytonaCapacitySlot(
+  reason: string,
+  deps: DaytonaSlotManagerDeps,
+  limits: { maxRunning: number; maxNonArchived: number },
+  excludeExternalId?: string,
+): Promise<void> {
+  if (inFlightCapacity) return inFlightCapacity;
+
+  const run = (async (): Promise<void> => {
+    const [startedAll, stoppedAll] = await Promise.all([
+      deps.listStarted(50),
+      deps.listStopped(50),
+    ]);
+    const startedKortix = startedAll.filter((sb) => sb.managed && sb.id !== excludeExternalId);
+    const stoppedKortix = stoppedAll.filter(
+      (sb) => sb.managed !== false && sb.id !== excludeExternalId,
+    );
+
+    const maxRunningOthers = Math.max(0, limits.maxRunning - 1);
+    const needStop = Math.max(0, startedKortix.length - maxRunningOthers);
+    const newlyStoppedIds: string[] = [];
+    if (needStop > 0) {
+      const stopRes = await stopSandboxesLru(
+        startedKortix,
+        needStop,
+        `lru-concurrency:${reason}`,
+        deps,
+      );
+      newlyStoppedIds.push(...stopRes.evictedIds);
+    }
+
+    const totalOtherNonArchived = startedKortix.length + stoppedKortix.length;
+    const maxOtherNonArchived = Math.max(0, limits.maxNonArchived - 1);
+    const needArchive = Math.max(0, totalOtherNonArchived - maxOtherNonArchived);
+    if (needArchive > 0) {
+      const archivePool: DaytonaStoppedSandboxSummary[] = [
+        ...stoppedKortix,
+        ...newlyStoppedIds.map((id) => ({ id, disk: 10, lastActivityAt: null, managed: true })),
+      ];
+      await archiveSandboxesLru(
+        archivePool,
+        needArchive,
+        `lru-disk:${reason}`,
+        deps,
+      );
+    }
+  })().finally(() => {
+    inFlightCapacity = null;
+  });
+
+  inFlightCapacity = run;
+  return run;
+}
