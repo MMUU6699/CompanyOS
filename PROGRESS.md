@@ -98,3 +98,39 @@
   - **Android Release APK (built first)**: `apps/mobile/android/app/build/outputs/apk/release/app-release.apk`, `89,572,194` bytes (`85.42 MB`), `arm64-v8a`, SHA-256 `E9CBBE0709BDB39F31481C2EBDAFF189A7B29C17D4A0B16AE7774135DCE6E620`, V2 signature verified; bundle scan confirmed `0` leaked secrets or upstream `kortix.com` links. Hosted directly at `https://github.com/MMUU6699/kortix-starter-workspace/releases/download/android-latest/kortix-latest.apk` (`HEAD` `HTTP 200`, `Content-Length: 89572194`).
   - **Mobile-Only Web Download Overhaul (`apps/web`, `@kortix/ui`)**: Removed all desktop installers/banners (`.dmg`, `.exe`, `.AppImage`, `Desktop` nav/promo items) and all App Store / Google Play / Microsoft Store links & badges across `/download`, `/mobile`, `/desktop` (redirects to `/download`), `/download/[platform]`, `MobileAppPromo`, `ComputerConnect`, `AppsModal`, and `ComputerTab`. Rendered centered Mobile-Only Download UI with direct **Download APK** button + non-clickable **iOS Coming Soon** (`قريباً` in Arabic) badge.
   - **Verification**: `@kortix/ui` & `apps/web` `tsgo --noEmit` exit `0`; `11/11` targeted download unit tests pass (`route.test.ts`, `pairing.test.tsx`, `platform-card.test.tsx`); split Next.js 16.4.2 build (`compile` + `generate`) exit `0` with `0` forbidden strings in `.next/static`; Netlify prod deploy (`6b01760fc9f8e2268759f8a7`) live-verified `HTTP 200` on `/`, `/auth`, `/download`, `/mobile`, `/api/health`, `HTTP 302` `/download/android` -> direct APK, and `/download/{ios,macos,windows,linux}` -> `/download`.
+
+---
+
+## Phase 8 — Cloud-Only Unified Free Multi-Model Vision + Tool-Calling Chain (NVIDIA NIM + OpenRouter `:free`) & Inline Execution Fix (Zero APK Rebuild)
+- **Status**: `COMPLETED & VERIFIED LIVE`
+- **Live NVIDIA NIM Discovery & Benchmark (`https://integrate.api.nvidia.com/v1`)**:
+  - Queried `GET /v1/models` (`33` accessible models) and benchmarked streaming TTFT/total latency, OpenAI-compatible `tools` (`web_search`), and Vision (`image_url` PNG data URI) with `chat_template_kwargs: { enable_thinking: false }` and `max_tokens: 4096..8192`:
+    1. `nvidia/nemotron-3.5-super-vl-120b-a12b` (`nvidia`): Vision **Yes (`1,129 ms`, `"Red"`)**, Tools **Yes (`724 ms`)**, Stream TTFT **`735 ms`** / Total **`740 ms`**
+    2. `stepfun-ai/step-5-preview` (`nvidia`): Vision **Yes (`3,353 ms`, `"Red"`)**, Tools **Yes (`1,527 ms`)**, Stream TTFT **`581 ms`** / Total **`1,095 ms`**
+    3. `minimaxai/minimax-m3.1-flash` (`nvidia`): Vision **Yes (`7,385 ms`, `"Red"`)**, Tools **Yes (`2,290 ms`)**, Stream TTFT **`808 ms`** / Total **`847 ms`**
+    4. `nvidia/nemotron-3.5-lightning-30b-a3b` (`nvidia`): Vision **No**, Tools **Yes (`517 ms`)**, Stream TTFT **`446 ms`** / Total **`458 ms`**
+    5. `nvidia/nemotron-3-ultra-550b-a55b` (`nvidia`): Vision **No**, Tools **Yes (`1,784 ms`)**, Stream TTFT **`987 ms`** / Total **`1,020 ms`**
+- **9-Model 100% Free Multi-Provider Chain (`kortix.runtime_config` + `OPENROUTER_FREE_MODELS`)**:
+  1. `nvidia/nemotron-3.5-super-vl-120b-a12b` (NVIDIA NIM — Vision + Tools)
+  2. `stepfun-ai/step-5-preview` (NVIDIA NIM — Vision + Tools)
+  3. `minimaxai/minimax-m3.1-flash` (NVIDIA NIM — Vision + Tools)
+  4. `nvidia/nemotron-3.5-lightning-30b-a3b` (NVIDIA NIM — Text + Tools)
+  5. `nvidia/nemotron-3-ultra-550b-a55b` (NVIDIA NIM — Text + Tools)
+  6. `nvidia/nemotron-3.5-super-vl:free` (OpenRouter — Vision + Tools)
+  7. `nvidia/nemotron-3.5-lightning:free` (OpenRouter — Text + Tools)
+  8. `nvidia/nemotron-3-ultra-550b-a55b:free` (OpenRouter — Text + Tools)
+  9. `openrouter/free` (OpenRouter — Free Models Router safety net)
+- **3 Cloud-Only Fixes Applied (`packages/llm-gateway` + `apps/api`)**:
+  1. **Fix 1 — Unified Free Multi-Provider Gateway + Vision Routing Guard**:
+     - Added `ALLOWED_FREE_NVIDIA_MODELS`, `VISION_CAPABLE_FREE_MODELS`, `isAllowedFreeNvidiaModelId`, `isAllowedFreeModelId`, `isVisionCapableFreeModelId`, `assertFreeNvidiaModelId`, and `assertFreeModelId` (`$0.00` strict guard).
+     - Configured `buildNvidiaNimPayload()` to default `chat_template_kwargs: { enable_thinking: false }`, `temperature: 0.2`, `max_tokens: 4096..8192`, and `15,000 ms` first-token timeout + 1-failure circuit breaker (`openRouterFreeBreakers`) across both `nvidia` and `openrouter`.
+     - Updated `resolveGatewayRoute()` and `openRouterFreeChainForRequest({ requiresVision })` so multimodal requests (`input.requires.imageInput === true`) route strictly across Vision-capable free models.
+  2. **Fix 2 — `Mykortix` Inline Execution (No Unnecessary Sub-Agent Multiplication)**:
+     - Updated `WORK` in `apps/api/src/projects/lib/my-kortix-prompt.ts` (`MY_KORTIX_PROMPT`) so `Mykortix` executes single-session web searches, URL visits, file creation, and single-page or multi-file HTML/CSS/JS website builds directly inline in `/workspace` using its own tools (`web_search`, `scrape_webpage`, `write`, `edit`, `read`, `bash`, `show`) instead of spawning 2–3 `General` sub-agent sessions via `agent`.
+  3. **Fix 3 — Cap `429 model_busy` Retry Loop & Clean Error Copy**:
+     - Updated `publicUpstreamError()` (`packages/llm-gateway/src/pipeline/public-identity.ts`) so the final `429 model_busy` message after 9-tier failover includes `(usage limit reached)` (matching `kortixd`'s `PERMANENT = /usage limit/i` classifier to stop infinite `Attempt 8 · Retrying in 190s` loops) and removed `"or choose another model"` from suggestions.
+- **Live Railway Deployment & Verification (`523bba8f-c67e-41e5-b16d-277d119834e3`, `SUCCESS`)**:
+  - `/health` and `/health/ready` verified `HTTP 200`.
+  - Live Streaming Chat via Railway gateway: `HTTP 200`, TTFT **`865 ms`**, Total **`1,034 ms`** (`nvidia/nemotron-3.5-super-vl-120b-a12b`, `$0.00000`).
+  - Live Tool Calling (`web_search`) via Railway gateway: `HTTP 200`, Total **`875 ms`** (`nvidia/nemotron-3.5-super-vl-120b-a12b`, valid JSON `tool_calls`, `$0.00000`).
+  - Live Vision (`image_url` 32x32 solid red PNG) via Railway gateway: `HTTP 200`, Total **`1,769 ms`** (`nvidia/nemotron-3.5-super-vl-120b-a12b`, reply `"Red"`, `$0.00000`).

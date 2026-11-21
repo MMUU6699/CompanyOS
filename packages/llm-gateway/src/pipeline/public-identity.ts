@@ -47,8 +47,8 @@ export function publicUpstreamError(status: number, upstreamText: string, model:
     return {
       status: 429,
       code: 'model_busy',
-      message: `${model} is at capacity right now.`,
-      suggestion: 'Retry in a few seconds, or choose another model.',
+      message: `${model} is at capacity right now (usage limit reached).`,
+      suggestion: 'Retry in a few seconds.',
     };
   }
   const tooLarge = requestTooLarge(status, upstreamText, sentBytes);
@@ -74,7 +74,7 @@ export function publicUpstreamError(status: number, upstreamText: string, model:
         status: 400,
         code: 'unsupported_input',
         message: `${model} could not read an attachment in this request.`,
-        suggestion: 'Remove the attachment or choose a model that supports it.',
+        suggestion: 'Remove the attachment and retry.',
       };
     }
     if (TOOL_DEFINITION.test(upstreamText)) {
@@ -82,21 +82,21 @@ export function publicUpstreamError(status: number, upstreamText: string, model:
         status: 400,
         code: 'invalid_tool_definition',
         message: `${model} rejected a tool definition in this request.`,
-        suggestion: 'Check the tool schemas, or choose another model.',
+        suggestion: 'Check the tool schemas and retry.',
       };
     }
     return {
       status: 400,
       code: 'invalid_request',
       message: `${model} rejected this request.`,
-      suggestion: 'Retry the request, or choose another model.',
+      suggestion: 'Retry the request.',
     };
   }
   return {
     status: 503,
     code: 'model_unavailable',
     message: `${model} is temporarily unavailable.`,
-    suggestion: 'Retry in a few seconds, or choose another model.',
+    suggestion: 'Retry in a few seconds.',
   };
 }
 

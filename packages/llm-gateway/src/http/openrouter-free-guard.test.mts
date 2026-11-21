@@ -3,9 +3,14 @@ import test from 'node:test';
 import type { UpstreamDescriptor } from '../domain/descriptor';
 import { UpstreamMisconfiguredError } from '../errors';
 import {
+  assertFreeModelId,
+  assertFreeNvidiaModelId,
   assertFreeOpenRouterModelId,
   callUpstream,
+  isAllowedFreeModelId,
+  isAllowedFreeNvidiaModelId,
   isAllowedFreeOpenRouterModelId,
+  isVisionCapableFreeModelId,
   openDirectStream,
 } from './call-upstream';
 import { dispatch } from '../pipeline/dispatch';
@@ -20,6 +25,14 @@ const FREE_CHAIN = [
   'nvidia/nemotron-3-ultra-550b-a55b:free',
   'nvidia/nemotron-3.5-super-vl:free',
   'openrouter/free',
+] as const;
+
+const NVIDIA_FREE_CHAIN = [
+  'nvidia/nemotron-3.5-super-vl-120b-a12b',
+  'stepfun-ai/step-5-preview',
+  'minimaxai/minimax-m3.1-flash',
+  'nvidia/nemotron-3.5-lightning-30b-a3b',
+  'nvidia/nemotron-3-ultra-550b-a55b',
 ] as const;
 
 function makeDescriptor(model: string, fallbacks?: readonly string[]): UpstreamDescriptor {
@@ -46,11 +59,27 @@ const silentLogger = {
   error() {},
 };
 
-test('hard zero-cost guard allows only :free models and openrouter/free', () => {
+test('hard zero-cost guard allows only allowlisted free NVIDIA NIM models, :free models, and openrouter/free', () => {
   for (const ok of FREE_CHAIN) {
     assert.equal(isAllowedFreeOpenRouterModelId(ok), true);
+    assert.equal(isAllowedFreeModelId(ok), true);
     assert.equal(assertFreeOpenRouterModelId(ok), ok);
+    assert.equal(assertFreeModelId(ok), ok);
   }
+  for (const nv of NVIDIA_FREE_CHAIN) {
+    assert.equal(isAllowedFreeNvidiaModelId(nv), true);
+    assert.equal(isAllowedFreeModelId(nv), true);
+    assert.equal(assertFreeNvidiaModelId(nv), nv);
+    assert.equal(assertFreeModelId(nv), nv);
+  }
+  assert.equal(isVisionCapableFreeModelId('nvidia/nemotron-3.5-super-vl-120b-a12b'), true);
+  assert.equal(isVisionCapableFreeModelId('stepfun-ai/step-5-preview'), true);
+  assert.equal(isVisionCapableFreeModelId('minimaxai/minimax-m3.1-flash'), true);
+  assert.equal(isVisionCapableFreeModelId('nvidia/nemotron-3.5-super-vl:free'), true);
+  assert.equal(isVisionCapableFreeModelId('openrouter/free'), true);
+  assert.equal(isVisionCapableFreeModelId('nvidia/nemotron-3.5-lightning-30b-a3b'), false);
+  assert.equal(isVisionCapableFreeModelId('nvidia/nemotron-3.5-lightning:free'), false);
+
   for (const paid of [
     'openai/gpt-4o',
     'anthropic/claude-3.5-sonnet',
@@ -60,8 +89,51 @@ test('hard zero-cost guard allows only :free models and openrouter/free', () => 
     '',
   ]) {
     assert.equal(isAllowedFreeOpenRouterModelId(paid), false);
+    assert.equal(isAllowedFreeNvidiaModelId(paid), false);
+    assert.equal(isAllowedFreeModelId(paid), false);
     assert.throws(() => assertFreeOpenRouterModelId(paid), UpstreamMisconfiguredError);
+    assert.throws(() => assertFreeNvidiaModelId(paid), UpstreamMisconfiguredError);
+    assert.throws(() => assertFreeModelId(paid), UpstreamMisconfiguredError);
   }
+});
+
+test('NVIDIA NIM payload enforces free model guard, enable_thinking: false default, and max_tokens >= 4096', async () => {
+  let capturedBody: any = null;
+  const fetchImpl = async (_url: string, init: RequestInit) => {
+    capturedBody = JSON.parse(String(init.body));
+    return Response.json({
+      id: 'nv-1',
+      model: NVIDIA_FREE_CHAIN[0],
+      choices: [{ index: 0, message: { role: 'assistant', content: 'Red' }, finish_reason: 'stop' }],
+    });
+  };
+
+  const nvDescriptor: UpstreamDescriptor = {
+    provider: 'nvidia',
+    kind: 'openai-compat',
+    baseUrl: 'https://integrate.api.nvidia.com/v1',
+    apiKey: 'test-nv-key',
+    billingMode: 'none',
+    markup: 0,
+    resolvedModel: NVIDIA_FREE_CHAIN[0],
+    publicProvider: 'kortix',
+    pricing: { inputPerMillion: 0, outputPerMillion: 0 },
+  };
+
+  const res = await callUpstream(
+    {
+      model: NVIDIA_FREE_CHAIN[0],
+      max_tokens: 512,
+      messages: [{ role: 'user', content: 'What color is this image?' }],
+    },
+    nvDescriptor,
+    { fetchImpl },
+  );
+
+  assert.equal(res.status, 200);
+  assert.equal(capturedBody.model, NVIDIA_FREE_CHAIN[0]);
+  assert.equal(capturedBody.max_tokens, 4096);
+  assert.deepEqual(capturedBody.chat_template_kwargs, { enable_thinking: false });
 });
 
 test('callUpstream refuses paid primary or paid fallback BEFORE any fetch call', async () => {

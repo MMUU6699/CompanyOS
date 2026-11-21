@@ -93,9 +93,27 @@ const OPENROUTER_MIN_OUTPUT_TOKENS = 4096;
 const OPENROUTER_MAX_OUTPUT_TOKENS = 16384;
 const OPENROUTER_NATIVE_MODELS_MAX = 3;
 
+export const ALLOWED_FREE_NVIDIA_MODELS: ReadonlySet<string> = new Set([
+  'nvidia/nemotron-3.5-super-vl-120b-a12b',
+  'stepfun-ai/step-5-preview',
+  'minimaxai/minimax-m3.1-flash',
+  'nvidia/nemotron-3.5-lightning-30b-a3b',
+  'nvidia/nemotron-3-ultra-550b-a55b',
+]);
+
+export const VISION_CAPABLE_FREE_MODELS: ReadonlySet<string> = new Set([
+  'nvidia/nemotron-3.5-super-vl-120b-a12b',
+  'stepfun-ai/step-5-preview',
+  'minimaxai/minimax-m3.1-flash',
+  'nvidia/nemotron-3.5-super-vl:free',
+  'google/gemma-4-31b-it:free',
+  OPENROUTER_FREE_ROUTER,
+]);
+
 /**
  * STRICT ZERO-COST GUARD: only OpenRouter `:free` models and the
- * `openrouter/free` free-only router may ever be sent upstream.
+ * `openrouter/free` free-only router may ever be sent to OpenRouter,
+ * and only allowlisted free-tier NVIDIA NIM models may be sent to NVIDIA NIM.
  */
 export function isAllowedFreeOpenRouterModelId(modelId: unknown): modelId is string {
   if (typeof modelId !== 'string') return false;
@@ -104,11 +122,47 @@ export function isAllowedFreeOpenRouterModelId(modelId: unknown): modelId is str
   return trimmed === OPENROUTER_FREE_ROUTER || trimmed.endsWith(':free');
 }
 
+export function isAllowedFreeNvidiaModelId(modelId: unknown): modelId is string {
+  if (typeof modelId !== 'string') return false;
+  const trimmed = modelId.trim();
+  if (!trimmed) return false;
+  return ALLOWED_FREE_NVIDIA_MODELS.has(trimmed);
+}
+
+export function isAllowedFreeModelId(modelId: unknown): modelId is string {
+  return isAllowedFreeOpenRouterModelId(modelId) || isAllowedFreeNvidiaModelId(modelId);
+}
+
+export function isVisionCapableFreeModelId(modelId: unknown): boolean {
+  if (typeof modelId !== 'string') return false;
+  return VISION_CAPABLE_FREE_MODELS.has(modelId.trim());
+}
+
 export function assertFreeOpenRouterModelId(modelId: unknown, context = 'model'): string {
   if (!isAllowedFreeOpenRouterModelId(modelId)) {
     throw new UpstreamMisconfiguredError(
       'openrouter',
       `Refused non-free OpenRouter ${context} "${String(modelId ?? '')}": only ":free" models or "openrouter/free" are permitted.`,
+    );
+  }
+  return modelId.trim();
+}
+
+export function assertFreeNvidiaModelId(modelId: unknown, context = 'model'): string {
+  if (!isAllowedFreeNvidiaModelId(modelId)) {
+    throw new UpstreamMisconfiguredError(
+      'nvidia',
+      `Refused non-allowlisted NVIDIA NIM ${context} "${String(modelId ?? '')}": only verified free-tier NVIDIA NIM models are permitted.`,
+    );
+  }
+  return modelId.trim();
+}
+
+export function assertFreeModelId(modelId: unknown, context = 'model'): string {
+  if (!isAllowedFreeModelId(modelId)) {
+    throw new UpstreamMisconfiguredError(
+      'kortix',
+      `Refused non-free ${context} "${String(modelId ?? '')}": only OpenRouter ":free" / "openrouter/free" or allowlisted free NVIDIA NIM models are permitted.`,
     );
   }
   return modelId.trim();
@@ -188,21 +242,24 @@ function buildOpenRouterFreePayload(
  * malformed tool-call argument JSON trigger an `UpstreamHttpError(502)` so
  * `dispatch()` automatically fails over to the next `:free` model.
  */
-async function validateNonStreamingOpenRouterResponse(response: Response): Promise<Response> {
+async function validateNonStreamingFreeResponse(
+  response: Response,
+  providerName = 'openrouter',
+): Promise<Response> {
   if (!response.ok) return response;
   const raw = await response.text();
   let parsed: Record<string, any>;
   try {
     parsed = JSON.parse(raw) as Record<string, any>;
   } catch {
-    throw new UpstreamHttpError(502, `Invalid JSON response from OpenRouter: ${raw.slice(0, 200)}`, 'openrouter');
+    throw new UpstreamHttpError(502, `Invalid JSON response from ${providerName}: ${raw.slice(0, 200)}`, providerName);
   }
   if (parsed?.error && typeof parsed.error === 'object') {
     const code = Number((parsed.error as { code?: unknown }).code);
     throw new UpstreamHttpError(
       code >= 400 && code <= 599 ? code : 502,
       raw.slice(0, 500),
-      'openrouter',
+      providerName,
     );
   }
   const choice = Array.isArray(parsed?.choices) ? parsed.choices[0] : null;
@@ -213,7 +270,7 @@ async function validateNonStreamingOpenRouterResponse(response: Response): Promi
     (typeof msg?.reasoning_content === 'string' && msg.reasoning_content.trim().length > 0);
   const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
   if (!hasContent && !hasReasoning && toolCalls.length === 0) {
-    throw new UpstreamHttpError(502, 'Empty assistant response from OpenRouter free model', 'openrouter');
+    throw new UpstreamHttpError(502, `Empty assistant response from ${providerName} free model`, providerName);
   }
   for (const tc of toolCalls) {
     const args = tc?.function?.arguments;
@@ -223,8 +280,8 @@ async function validateNonStreamingOpenRouterResponse(response: Response): Promi
       } catch {
         throw new UpstreamHttpError(
           502,
-          `Malformed tool_call JSON from OpenRouter free model (${tc?.function?.name ?? 'unknown'})`,
-          'openrouter',
+          `Malformed tool_call JSON from ${providerName} free model (${tc?.function?.name ?? 'unknown'})`,
+          providerName,
         );
       }
     }
@@ -237,9 +294,9 @@ async function validateNonStreamingOpenRouterResponse(response: Response): Promi
 }
 
 const NVIDIA_NIM_HOST = 'integrate.api.nvidia.com';
-const NVIDIA_LOCKED_MODEL = 'google/gemma-4-31b-it';
+const NVIDIA_DEFAULT_MODEL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
 const NVIDIA_DEFAULT_MAX_TOKENS = 8192;
-const NVIDIA_MIN_THINKING_MAX_TOKENS = 4096;
+const NVIDIA_MIN_OUTPUT_TOKENS = 4096;
 const NVIDIA_MAX_OUTPUT_TOKENS = 8192;
 
 function isNvidiaNimDescriptor(descriptor: UpstreamDescriptor): boolean {
@@ -261,34 +318,41 @@ function buildNvidiaNimPayload(
     reasoning_effort: _ignoredEffort,
     ...rest
   } = body;
+  const targetModel = assertFreeNvidiaModelId(
+    descriptor.resolvedModel || rest.model || NVIDIA_DEFAULT_MODEL,
+    'NVIDIA NIM model',
+  );
   const requestedMaxTokens =
     typeof rest.max_tokens === 'number' && Number.isFinite(rest.max_tokens) && rest.max_tokens > 0
       ? Math.floor(rest.max_tokens)
       : typeof maxCompletionTokens === 'number' && Number.isFinite(maxCompletionTokens) && maxCompletionTokens > 0
         ? Math.floor(maxCompletionTokens)
         : NVIDIA_DEFAULT_MAX_TOKENS;
-  // With enable_thinking: true, Gemma 4 31B emits reasoning tokens before tool
-  // calls and prose. A 1024-token ceiling truncates tool calls and answers;
-  // keep a safe 4096..8192 output window matching NVIDIA_LOCKED_MANAGED_MODEL.
   const maxTokens = Math.min(
     NVIDIA_MAX_OUTPUT_TOKENS,
-    Math.max(requestedMaxTokens, NVIDIA_MIN_THINKING_MAX_TOKENS),
+    Math.max(requestedMaxTokens, NVIDIA_MIN_OUTPUT_TOKENS),
   );
+  // Keep enable_thinking: false by default so tool calls and chat responses
+  // stream in < 1s without stalling in 32k-token hidden reasoning loops.
+  const explicitThinking =
+    existingTemplateKwargs &&
+    typeof existingTemplateKwargs === 'object' &&
+    !Array.isArray(existingTemplateKwargs) &&
+    typeof (existingTemplateKwargs as Record<string, unknown>).enable_thinking === 'boolean'
+      ? Boolean((existingTemplateKwargs as Record<string, unknown>).enable_thinking)
+      : false;
   const templateKwargs =
     existingTemplateKwargs && typeof existingTemplateKwargs === 'object' && !Array.isArray(existingTemplateKwargs)
-      ? { ...(existingTemplateKwargs as Record<string, unknown>), enable_thinking: true }
-      : { enable_thinking: true };
+      ? { ...(existingTemplateKwargs as Record<string, unknown>), enable_thinking: explicitThinking }
+      : { enable_thinking: false };
 
   return {
     ...rest,
-    model: descriptor.resolvedModel || NVIDIA_LOCKED_MODEL,
+    model: targetModel,
     max_tokens: maxTokens,
     stream: Boolean(rest.stream),
-    temperature: typeof rest.temperature === 'number' ? rest.temperature : 1,
+    temperature: typeof rest.temperature === 'number' ? rest.temperature : 0.2,
     top_p: typeof rest.top_p === 'number' ? rest.top_p : 0.95,
-    frequency_penalty: typeof rest.frequency_penalty === 'number' ? rest.frequency_penalty : 0,
-    presence_penalty: typeof rest.presence_penalty === 'number' ? rest.presence_penalty : 0,
-    seed: typeof rest.seed === 'number' ? rest.seed : 0,
     chat_template_kwargs: templateKwargs,
   };
 }
@@ -473,15 +537,17 @@ export async function callUpstream(
     const sent = google ? restoreGeminiThoughtSignatures(body, descriptor.resolvedModel) : body;
     const response = await directOpenAiRequest(sent, descriptor, opts);
     const isOpenRouter = isOpenRouterDescriptor(descriptor);
+    const isNvidia = !isOpenRouter && isNvidiaNimDescriptor(descriptor);
+    const isManagedFree = isOpenRouter || isNvidia;
     const opened = streaming
       ? await openDirectStream(response, descriptor.provider, {
           signal: clientSignal,
-          ...(isOpenRouter
+          ...(isManagedFree
             ? { commitAfterMs: OPENROUTER_STREAM_FIRST_TOKEN_TIMEOUT_MS, failOnTimeout: true }
             : {}),
         })
-      : isOpenRouter
-        ? await validateNonStreamingOpenRouterResponse(response)
+      : isManagedFree
+        ? await validateNonStreamingFreeResponse(response, descriptor.provider)
         : response;
     return google ? exposeGeminiThoughtSignaturesInResponse(opened, streaming) : opened;
   }

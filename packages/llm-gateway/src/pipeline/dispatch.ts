@@ -126,11 +126,8 @@ export function upstreamHeadersTimeoutMs(
   descriptor: UpstreamDescriptor,
   streaming: boolean,
 ): number {
-  if (descriptor.provider === 'openrouter') {
+  if (descriptor.provider === 'openrouter' || descriptor.provider === 'nvidia') {
     return Math.min(UPSTREAM_HEADERS_TIMEOUT_MS, OPENROUTER_FIRST_TOKEN_TIMEOUT_MS);
-  }
-  if (descriptor.provider === 'nvidia') {
-    return Math.max(UPSTREAM_HEADERS_TIMEOUT_MS, 300_000);
   }
   const transportKind = resolveTransportKind(body, descriptor);
   const hasSyntheticStreamingHeaders =
@@ -588,8 +585,9 @@ export async function dispatch(
 
   let attempt = first;
   for (;;) {
-    const isOpenRouterAttempt = attempt.descriptor.provider === 'openrouter';
-    const breakers = ctx.breakers ?? (isOpenRouterAttempt ? openRouterFreeBreakers : upstreamBreakers);
+    const isFreeManagedAttempt =
+      attempt.descriptor.provider === 'openrouter' || attempt.descriptor.provider === 'nvidia';
+    const breakers = ctx.breakers ?? (isFreeManagedAttempt ? openRouterFreeBreakers : upstreamBreakers);
     const key = breakerKey(attempt.descriptor, attempt.model);
     const admitted = breakers.allow(key);
     if (!admitted) {
@@ -630,7 +628,7 @@ export async function dispatch(
         return { descriptor, model: servedModel, attempts, candidatesTried, attemptFailures, response: result };
       }
       if (result.error instanceof ClientAbortError || ctx.signal?.aborted) return finish(result);
-      const shouldTrip = isOpenRouterAttempt
+      const shouldTrip = isFreeManagedAttempt
         ? tripsOpenRouterBreaker(result.status)
         : tripsBreaker(result.status);
       if (shouldTrip) {

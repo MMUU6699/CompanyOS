@@ -1,8 +1,13 @@
 import { sql } from 'drizzle-orm';
 import {
+  assertFreeModelId,
+  assertFreeNvidiaModelId,
   assertFreeOpenRouterModelId,
   GatewayResolutionError,
+  isAllowedFreeModelId,
+  isAllowedFreeNvidiaModelId,
   isAllowedFreeOpenRouterModelId,
+  isVisionCapableFreeModelId,
   type UpstreamDescriptor,
 } from '@kortix/llm-gateway';
 import { config } from '../../config';
@@ -10,34 +15,52 @@ import { db, hasDatabase } from '../../shared/db';
 import type { ManagedModel } from '../models/managed-models';
 
 /**
- * STRICT 100% FREE-ONLY OpenRouter multi-model fallback chain.
+ * STRICT 100% FREE-ONLY Unified Multi-Provider (NVIDIA NIM + OpenRouter `:free`)
+ * fallback chain with Vision-aware routing.
  *
- * Every model in this chain MUST end with `:free` (verified $0.00 prompt &
- * $0.00 completion on OpenRouter) or equal `openrouter/free` (OpenRouter's
- * Free Models Router). Paid models are hard-blocked at both resolution and
- * upstream wire level (`assertFreeOpenRouterModelId`).
+ * Every model in this chain is 100% free ($0.00 prompt & $0.00 completion):
+ * - Free NVIDIA NIM models (verified live against https://integrate.api.nvidia.com/v1)
+ * - Free OpenRouter models ending with `:free` or `openrouter/free`
+ * Paid models are hard-blocked at both resolution and upstream wire level
+ * (`assertFreeModelId`, `assertFreeNvidiaModelId`, `assertFreeOpenRouterModelId`).
  *
- * Verified live 2026-11-20 against https://openrouter.ai/api/v1/models +
- * live streaming & tool-calling benchmark ($0.00 cost):
- *   1. Primary:          nvidia/nemotron-3.5-lightning:free     (1M ctx, 411ms TTFT, 540ms tool call)
- *   2. Fallback 1:       nvidia/nemotron-3-ultra-550b-a55b:free (1M ctx, 1012ms TTFT, 3284ms tool call)
- *   3. Fallback 2:       nvidia/nemotron-3.5-super-vl:free      (1M ctx, vision, 613ms TTFT, 1553ms total)
- *   4. Final Safety Net: openrouter/free                        (200k ctx, free-only router)
+ * Verified live 2026-11-21 benchmark (Speed + OpenAI Tools + Vision `image_url`):
+ *   1. nvidia/nemotron-3.5-super-vl-120b-a12b (NVIDIA NIM — Vision 1129ms, Tools 724ms, Stream TTFT 735ms)
+ *   2. stepfun-ai/step-5-preview              (NVIDIA NIM — Vision 3353ms, Tools 1527ms, Stream TTFT 581ms)
+ *   3. minimaxai/minimax-m3.1-flash           (NVIDIA NIM — Vision 7385ms, Tools 2290ms, Stream TTFT 808ms)
+ *   4. nvidia/nemotron-3.5-lightning-30b-a3b  (NVIDIA NIM — Text + Tools 517ms, Stream TTFT 446ms)
+ *   5. nvidia/nemotron-3-ultra-550b-a55b      (NVIDIA NIM — Text + Tools 1784ms, Stream TTFT 987ms)
+ *   6. nvidia/nemotron-3.5-super-vl:free      (OpenRouter — Vision + Tools, 613ms TTFT)
+ *   7. nvidia/nemotron-3.5-lightning:free     (OpenRouter — Text + Tools, 411ms TTFT)
+ *   8. nvidia/nemotron-3-ultra-550b-a55b:free (OpenRouter — Text + Tools, 1012ms TTFT)
+ *   9. openrouter/free                        (OpenRouter — Free Models Router safety net)
  */
 export const OPENROUTER_FREE_PROVIDER_ID = 'openrouter';
+export const NVIDIA_FREE_PROVIDER_ID = 'nvidia';
 export const OPENROUTER_DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
+export const NVIDIA_DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1';
 export const OPENROUTER_FREE_SAFETY_NET = 'openrouter/free';
 export const OPENROUTER_APP_NAME = 'Kortix';
 export const OPENROUTER_APP_REFERER = 'https://kortix-computer-app.netlify.app';
 
 export const DEFAULT_OPENROUTER_FREE_CHAIN = [
+  'nvidia/nemotron-3.5-super-vl-120b-a12b',
+  'stepfun-ai/step-5-preview',
+  'minimaxai/minimax-m3.1-flash',
+  'nvidia/nemotron-3.5-lightning-30b-a3b',
+  'nvidia/nemotron-3-ultra-550b-a55b',
+  'nvidia/nemotron-3.5-super-vl:free',
   'nvidia/nemotron-3.5-lightning:free',
   'nvidia/nemotron-3-ultra-550b-a55b:free',
-  'nvidia/nemotron-3.5-super-vl:free',
   OPENROUTER_FREE_SAFETY_NET,
 ] as const;
 
 const OPENROUTER_MODEL_DISPLAY_NAMES: Record<string, string> = {
+  'nvidia/nemotron-3.5-super-vl-120b-a12b': 'Nemotron 3.5 Super VL 120B (Free)',
+  'stepfun-ai/step-5-preview': 'Step 5 Preview VL (Free)',
+  'minimaxai/minimax-m3.1-flash': 'MiniMax M3.1 Flash VL (Free)',
+  'nvidia/nemotron-3.5-lightning-30b-a3b': 'Nemotron 3.5 Lightning 30B (Free)',
+  'nvidia/nemotron-3-ultra-550b-a55b': 'Nemotron 3 Ultra 550B (Free)',
   'nvidia/nemotron-3.5-lightning:free': 'Nemotron 3.5 Lightning (Free)',
   'nvidia/nemotron-3-ultra-550b-a55b:free': 'Nemotron 3 Ultra 550B (Free)',
   'nvidia/nemotron-3.5-super-vl:free': 'Nemotron 3.5 Super VL (Free)',
@@ -81,11 +104,11 @@ function parseRawModelEntries(raw: unknown): string[] {
 function validateFreeChainOrThrow(entries: string[], sourceName: string): readonly string[] {
   const validated: string[] = [];
   for (const modelId of entries) {
-    if (!isAllowedFreeOpenRouterModelId(modelId)) {
+    if (!isAllowedFreeModelId(modelId)) {
       throw new GatewayResolutionError(
         'model_disabled_on_deployment',
-        `${sourceName} contains non-free model "${modelId}". Only ":free" models or "openrouter/free" are allowed.`,
-        `Remove paid models from ${sourceName} and keep only ":free" models or "openrouter/free".`,
+        `${sourceName} contains non-free model "${modelId}". Only allowlisted free NVIDIA NIM models, ":free" models, or "openrouter/free" are allowed.`,
+        `Remove paid models from ${sourceName} and keep only free NVIDIA NIM models, ":free" models, or "openrouter/free".`,
       );
     }
     if (!validated.includes(modelId)) {
@@ -107,7 +130,7 @@ function envOpenRouterFreeChain(): readonly string[] {
 }
 
 /**
- * Refreshes the active `:free` fallback chain from Supabase `kortix.runtime_config`
+ * Refreshes the active free fallback chain from Supabase `kortix.runtime_config`
  * (`key = 'openrouter_free_models'`) with a 30s in-memory cache so cloud model
  * order/failover changes take effect immediately across Web + existing APKs with
  * zero rebuilds. Any non-free/paid entry in DB is rejected with a warning.
@@ -157,15 +180,35 @@ export async function refreshOpenRouterFreeChainIfStale(): Promise<readonly stri
 }
 
 /**
- * Returns the active 100% FREE OpenRouter fallback chain (cloud override if
+ * Returns the active 100% FREE multi-provider fallback chain (cloud override if
  * present & valid, else `OPENROUTER_FREE_MODELS` env var, else default chain).
+ * If `NVIDIA_API_KEY` is not set, filters out NVIDIA-direct models automatically.
  * Paid models are always refused; `openrouter/free` is always appended last.
  */
 export function openRouterFreeChain(): readonly string[] {
-  if (cachedCloudChain && cachedCloudChain.length > 0) {
-    return cachedCloudChain;
+  const baseChain =
+    cachedCloudChain && cachedCloudChain.length > 0 ? cachedCloudChain : envOpenRouterFreeChain();
+  const hasNvidiaKey = Boolean((config.NVIDIA_API_KEY ?? '').trim());
+  if (hasNvidiaKey) {
+    return baseChain;
   }
-  return envOpenRouterFreeChain();
+  const openRouterOnly = baseChain.filter((m) => isAllowedFreeOpenRouterModelId(m));
+  return openRouterOnly.length > 0 ? openRouterOnly : [OPENROUTER_FREE_SAFETY_NET];
+}
+
+/**
+ * Vision-aware chain selector: when `requiresVision` is true (e.g. request contains
+ * `image_url` / multimodal input), filters the active free chain down to Vision-capable
+ * free models (`nvidia/nemotron-3.5-super-vl-120b-a12b`, `stepfun-ai/step-5-preview`,
+ * `minimaxai/minimax-m3.1-flash`, `nvidia/nemotron-3.5-super-vl:free`, `openrouter/free`).
+ */
+export function openRouterFreeChainForRequest(opts?: { requiresVision?: boolean }): readonly string[] {
+  const chain = openRouterFreeChain();
+  if (!opts?.requiresVision) {
+    return chain;
+  }
+  const visionChain = chain.filter((m) => isVisionCapableFreeModelId(m));
+  return visionChain.length > 0 ? visionChain : [OPENROUTER_FREE_SAFETY_NET];
 }
 
 export function primaryOpenRouterFreeModelId(): string {
@@ -175,11 +218,11 @@ export function primaryOpenRouterFreeModelId(): string {
 export function isInOpenRouterFreeChain(modelId: string | null | undefined): boolean {
   if (!modelId) return false;
   const trimmed = modelId.trim();
-  return openRouterFreeChain().includes(trimmed);
+  return openRouterFreeChain().includes(trimmed) || isAllowedFreeModelId(trimmed);
 }
 
 export function openRouterFreeManagedModel(modelId = primaryOpenRouterFreeModelId()): ManagedModel {
-  const safeId = assertFreeOpenRouterModelId(modelId, 'managed model');
+  const safeId = assertFreeModelId(modelId, 'managed model');
   return {
     id: safeId,
     name: OPENROUTER_MODEL_DISPLAY_NAMES[safeId] ?? safeId,
@@ -222,17 +265,48 @@ export function openRouterFreeGatewayCatalog() {
 }
 
 /**
- * Builds the OpenRouter UpstreamDescriptor for `requestedModel`:
- * - If `requestedModel` is an explicit member of our verified 100% `:free`
- *   fallback chain (e.g. during `dispatch()` failover), routes to that exact
- *   `:free` model with up to 2 remaining `:free` models in OpenRouter's native
- *   `models` fallback array (max 3 total per OpenRouter API limit).
- * - Otherwise pins strictly to Primary (`openRouterFreeChain()[0]`) so callers
- *   can never bypass the free-only policy with an arbitrary or paid model slug.
+ * Builds the UpstreamDescriptor for `requestedModel` across NVIDIA NIM (free tier)
+ * and OpenRouter (`:free` / `openrouter/free`):
+ * - If `targetModel` is an allowlisted free NVIDIA NIM model and `NVIDIA_API_KEY`
+ *   is configured, routes directly to `https://integrate.api.nvidia.com/v1` with
+ *   low-latency `enable_thinking: false` and `$0.00` billing.
+ * - Otherwise routes to OpenRouter `:free` with up to 2 remaining OpenRouter `:free`
+ *   models in OpenRouter's native `models` fallback array (max 3 total).
  */
 export function openRouterFreeDescriptorForModel(requestedModel?: string | null): UpstreamDescriptor {
-  const apiKey = (config.OPENROUTER_API_KEY ?? '').trim();
-  if (!apiKey) {
+  const chain = openRouterFreeChain();
+  const normalized = (requestedModel ?? '').trim();
+  const idx = normalized ? chain.indexOf(normalized) : -1;
+  const targetModel = assertFreeModelId(
+    idx >= 0 ? chain[idx]! : isAllowedFreeModelId(normalized) ? normalized : chain[0]!,
+    'resolved model',
+  );
+
+  const nvidiaApiKey = (config.NVIDIA_API_KEY ?? '').trim();
+  if (isAllowedFreeNvidiaModelId(targetModel) && nvidiaApiKey) {
+    const safeNvidiaModel = assertFreeNvidiaModelId(targetModel, 'resolved nvidia model');
+    const baseUrl = (config.NVIDIA_NIM_BASE_URL || NVIDIA_DEFAULT_BASE_URL).replace(/\/+$/, '');
+    return {
+      provider: NVIDIA_FREE_PROVIDER_ID,
+      kind: 'openai-compat',
+      baseUrl,
+      apiKey: nvidiaApiKey,
+      credentialRef: 'env:NVIDIA_API_KEY',
+      billingMode: 'none',
+      markup: 0,
+      resolvedModel: safeNvidiaModel,
+      publicProvider: 'kortix',
+      pricing: {
+        inputPerMillion: 0,
+        outputPerMillion: 0,
+      },
+      reasoning: false,
+      temperature: true,
+    };
+  }
+
+  const openRouterApiKey = (config.OPENROUTER_API_KEY ?? '').trim();
+  if (!openRouterApiKey) {
     throw new GatewayResolutionError(
       'model_disabled_on_deployment',
       'OPENROUTER_API_KEY is not configured on the backend server.',
@@ -240,18 +314,14 @@ export function openRouterFreeDescriptorForModel(requestedModel?: string | null)
     );
   }
 
-  const chain = openRouterFreeChain();
-  const normalized = (requestedModel ?? '').trim();
-  const idx = normalized ? chain.indexOf(normalized) : -1;
-  const targetModel = assertFreeOpenRouterModelId(
-    idx >= 0 ? chain[idx]! : chain[0]!,
-    'resolved model',
-  );
+  const openRouterModelsInChain = chain.filter((m) => isAllowedFreeOpenRouterModelId(m));
+  const openRouterTarget = isAllowedFreeOpenRouterModelId(targetModel)
+    ? assertFreeOpenRouterModelId(targetModel, 'resolved openrouter model')
+    : assertFreeOpenRouterModelId(openRouterModelsInChain[0] ?? OPENROUTER_FREE_SAFETY_NET, 'fallback openrouter model');
 
-  // OpenRouter caps `models` at 3 items total (primary + 2 native fallbacks).
-  // Remaining tiers are also covered by Kortix gateway `dispatch()` failover.
-  const nativeFallbacks = chain
-    .slice(idx >= 0 ? idx : 0)
+  const orIdx = openRouterModelsInChain.indexOf(openRouterTarget);
+  const nativeFallbacks = openRouterModelsInChain
+    .slice(orIdx >= 0 ? orIdx : 0)
     .slice(0, 3)
     .map((m) => assertFreeOpenRouterModelId(m, 'native fallback'));
 
@@ -260,14 +330,14 @@ export function openRouterFreeDescriptorForModel(requestedModel?: string | null)
     provider: OPENROUTER_FREE_PROVIDER_ID,
     kind: 'openai-compat',
     baseUrl,
-    apiKey,
+    apiKey: openRouterApiKey,
     credentialRef: 'env:OPENROUTER_API_KEY',
     billingMode: 'none',
     markup: 0,
     appName: OPENROUTER_APP_NAME,
     appReferer: OPENROUTER_APP_REFERER,
-    resolvedModel: targetModel,
-    fallbackModels: nativeFallbacks,
+    resolvedModel: openRouterTarget,
+    fallbackModels: nativeFallbacks.length > 0 ? nativeFallbacks : [openRouterTarget],
     publicProvider: 'kortix',
     pricing: {
       inputPerMillion: 0,

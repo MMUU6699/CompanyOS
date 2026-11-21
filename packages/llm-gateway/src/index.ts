@@ -49,9 +49,16 @@ export {
 export type { PublicUpstreamError } from './pipeline/public-identity';
 
 export {
+  ALLOWED_FREE_NVIDIA_MODELS,
+  VISION_CAPABLE_FREE_MODELS,
+  assertFreeModelId,
+  assertFreeNvidiaModelId,
   assertFreeOpenRouterModelId,
   callUpstream,
+  isAllowedFreeModelId,
+  isAllowedFreeNvidiaModelId,
   isAllowedFreeOpenRouterModelId,
+  isVisionCapableFreeModelId,
 } from './http';
 export type { CallUpstreamOptions, FetchImpl } from './http';
 

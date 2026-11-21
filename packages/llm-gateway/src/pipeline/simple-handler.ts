@@ -958,7 +958,7 @@ export async function handleChatCompletions(
         requestedModel,
         resolvedModel: served.resolvedModel ?? routedModel,
         requestId: id,
-        suggestion: 'Retry the request, or choose another model.',
+        suggestion: 'Retry the request.',
       });
     return gatewayErrorResponse(502, {
       message: error instanceof Error ? error.message : 'Provider request failed',
@@ -967,7 +967,7 @@ export async function handleChatCompletions(
       requestedModel,
       resolvedModel: served.resolvedModel ?? routedModel,
       requestId: id,
-      suggestion: 'Retry the request or choose another model.',
+      suggestion: 'Retry the request.',
     });
   }
   const upstream = outcome.response;
