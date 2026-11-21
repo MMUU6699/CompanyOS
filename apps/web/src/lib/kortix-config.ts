@@ -19,6 +19,10 @@ import {
   notifySessionError,
   notifyTaskComplete,
 } from '@kortix/ui/internal/lib/web-notifications';
+import {
+  dispatchDaytonaReconnectRequired,
+  isDaytonaReconnectError,
+} from '@/lib/onboarding/daytona-client';
 import { configureKortix, parseFlagOverride } from '@kortix/sdk';
 
 let configured = false;
@@ -79,6 +83,9 @@ export function ensureKortixConfigured(tI18nComplete: UiTranslator): void {
         notifyPermissionRequest(e.sessionId, e.toolName as string, title, uiTranslator, projectId);
     },
     onError: (error, context) => {
+      if (isDaytonaReconnectError(error)) {
+        dispatchDaytonaReconnectRequired();
+      }
       if (!uiTranslator) return;
       handleApiError(error, context as Parameters<typeof handleApiError>[1], uiTranslator);
     },

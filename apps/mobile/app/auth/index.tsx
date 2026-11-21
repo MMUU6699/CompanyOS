@@ -14,7 +14,7 @@
  */
 
 import * as React from 'react';
-import { View, Platform, useWindowDimensions } from 'react-native';
+import { Pressable, ScrollView, View, Platform, useWindowDimensions } from 'react-native';
 import { useRouter, Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useColorScheme } from 'nativewind';
@@ -23,6 +23,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useIsFocused } from 'expo-router/react-navigation';
 
 import { KortixCurrents } from '@/components/animations/kortix-currents';
+import { DaytonaStepView, MobileOnboardingStepper } from '@/components/auth/DaytonaStepView';
 import { DeploymentSheet } from '@/components/auth/DeploymentSheet';
 import { AppleIcon, GoogleIcon } from '@/components/icons/auth-icons';
 import { KortixLogo } from '@/components/kortix/KortixLogo';
@@ -35,7 +36,12 @@ import { useOAuthSignIn } from '@/hooks/useOAuthSignIn';
 import { appleEnabled, googleEnabled } from '@/lib/auth/auth-config';
 import { fetchSsoEnabled } from '@/lib/deployment/deployment';
 import { activeDeployment } from '@/lib/deployment/store';
-import { BuildingsIcon } from '@/lib/icons';
+import { BuildingsIcon, CheckCircleIcon } from '@/lib/icons';
+import {
+  clearPendingDaytonaClaim,
+  clearPendingManualDaytonaKey,
+  hasPendingDaytonaOnboarding,
+} from '@/lib/onboarding/daytona-client';
 import { THEME, withAlpha } from '@/lib/utils/theme';
 
 export default function AuthScreen() {
@@ -70,10 +76,63 @@ export default function AuthScreen() {
     };
   }, []);
 
+  const [step, setStep] = React.useState<'daytona' | 'signin'>('daytona');
+  const [daytonaDone, setDaytonaDone] = React.useState(false);
+
+  React.useEffect(() => {
+    let active = true;
+    void hasPendingDaytonaOnboarding().then((hasPending) => {
+      if (active && hasPending) {
+        setDaytonaDone(true);
+        setStep('signin');
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // Already-signed-in users never see auth.
   React.useEffect(() => {
     if (isAuthenticated) router.replace('/');
   }, [isAuthenticated, router]);
+
+  if (step === 'daytona') {
+    return (
+      <>
+        <Stack.Screen options={{ headerShown: false, gestureEnabled: false }} />
+        <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: colors.background,
+            paddingTop: insets.top + 16,
+            paddingBottom: insets.bottom + 14,
+          }}>
+          <ScrollView
+            contentContainerStyle={{
+              flexGrow: 1,
+              justifyContent: 'center',
+              paddingHorizontal: 24,
+              paddingVertical: 16,
+            }}
+            keyboardShouldPersistTaps="handled">
+            <View style={{ alignItems: 'center', marginBottom: 32 }}>
+              <KortixLogo variant="text" size={26} color={scheme} />
+            </View>
+            <DaytonaStepView
+              mode="pre-auth"
+              onComplete={() => {
+                setDaytonaDone(true);
+                setStep('signin');
+              }}
+              onSkipToSignIn={() => setStep('signin')}
+            />
+          </ScrollView>
+        </View>
+      </>
+    );
+  }
 
   return (
     <>
@@ -113,10 +172,44 @@ export default function AuthScreen() {
           <View style={{ width: '100%' }}>
             {/* The symbol is already forming in the field above, so this is the
                 logomark — never the symbol a second time. */}
-            <View style={{ alignItems: 'center', marginBottom: 28 }}>
+            <View style={{ alignItems: 'center', marginBottom: 20 }}>
               {/* `color` names the background it sits on: dark → white wordmark. */}
               <KortixLogo variant="text" size={28} color={scheme} />
             </View>
+
+            {daytonaDone ? (
+              <View className="mb-4 gap-2.5">
+                <MobileOnboardingStepper activeStep={2} step1Complete />
+                <View className="flex-row items-center justify-between rounded-2xl border border-border bg-card px-4 py-2.5">
+                  <View className="flex-row items-center gap-2">
+                    <Icon as={CheckCircleIcon} size={16} color={colors.primary} />
+                    <Text variant="small" className="font-roobert-medium text-foreground">
+                      Step 1 complete · Daytona connected
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={() => {
+                      void clearPendingDaytonaClaim();
+                      clearPendingManualDaytonaKey();
+                      setDaytonaDone(false);
+                      setStep('daytona');
+                    }}
+                    hitSlop={8}>
+                    <Text variant="small" className="text-muted-foreground underline">
+                      Change
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : (
+              <Pressable
+                onPress={() => setStep('daytona')}
+                className="mb-3 items-center py-1 active:opacity-70">
+                <Text variant="small" className="text-muted-foreground underline">
+                  New user? Connect Daytona first (Step 1)
+                </Text>
+              </Pressable>
+            )}
 
             {oauthError ? (
               <View

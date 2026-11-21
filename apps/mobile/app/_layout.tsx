@@ -29,7 +29,12 @@ import { OVERLAY_PORTAL_HOST } from '@/lib/ui/portal-hosts';
 import { ToastProvider } from '@/components/kortix/toast-provider';
 import { OfflineBanner } from '@/components/kortix/OfflineBanner';
 import { SessionEndedDialog } from '@/components/kortix/SessionEndedDialog';
+import { DaytonaOnboardingGate } from '@/components/auth/DaytonaOnboardingGate';
 import { SsoRequiredSignOut } from '@/components/auth/SsoRequiredSignOut';
+import {
+  isDaytonaReconnectError,
+  notifyDaytonaReconnectRequired,
+} from '@/lib/onboarding/daytona-client';
 import { PastedTextSheet } from '@/components/files/PastedTextSheet';
 import { PushNotificationsBridge } from '@/components/notifications/PushNotificationsBridge';
 import { reportUnauthorized } from '@/lib/auth/session-expiry-monitor';
@@ -106,6 +111,7 @@ createKortix({
     log.error('❌ [kortix-sdk] request failed:', error, context);
     // A 401 may mean the login ended: the monitor checks once (COR-144).
     if ((error as { status?: unknown } | null)?.status === 401) reportUnauthorized();
+    if (isDaytonaReconnectError(error)) notifyDaytonaReconnectRequired();
   },
   // 403 `sso_required` from an SDK REST call: `SsoRequiredSignOut` signs out (KRTX-1716).
   onAccessRemedy: reportAccessRemedy,
@@ -602,6 +608,7 @@ export default function RootLayout() {
                                   />
                                 </Stack>
                               </AuthProtection>
+                              <DaytonaOnboardingGate />
                             </View>
                             <OtaUpdateManager />
                             <GlobalUpgradeSheet />

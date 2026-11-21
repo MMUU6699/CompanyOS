@@ -606,11 +606,28 @@ export async function provisionSessionSandbox(opts: {
     (await import('../../drives/service')
       .then((m) => m.sessionDriveMountEnabled() && m.sessionMountsSpaceFiles(projectId, sandboxId))
       .catch(() => false));
-  const resolveImage = (
+  const resolveImage = async (
     gitProject: GitBackedProject,
     targetProvider: string,
-  ): Promise<EnsureSandboxImageResult> =>
-    isMyKortixSandboxSlug(slug)
+  ): Promise<EnsureSandboxImageResult> => {
+    if (targetProvider === 'daytona') {
+      const { ensureUserSnapshotActive, resolveDaytonaContextForOwner } = await import(
+        '../../onboarding/daytona-service'
+      );
+      const userDaytona = await resolveDaytonaContextForOwner({ userId, accountId });
+      if (userDaytona) {
+        const ensured = await ensureUserSnapshotActive(userDaytona);
+        return {
+          snapshotName: ensured.snapshotName,
+          slug,
+          contentHash: ensured.snapshotName,
+          built: false,
+          isDefault: true,
+          runtimeProfile: isMyKortixSandboxSlug(slug) ? 'mykortix' : 'standard',
+        };
+      }
+    }
+    return isMyKortixSandboxSlug(slug)
       ? ensureMyKortixSandboxImage({ source: 'session-start', provider: targetProvider, projectId })
       : ensureSessionImage(gitProject, {
           slug,
@@ -621,6 +638,7 @@ export async function provisionSessionSandbox(opts: {
           onStep: reportImageStep,
           onTiming: (step) => tl.note(`image-step:${step}`),
         });
+  };
 
   // Kick image resolution off NOW, in parallel with the token round-trip below.
   // The snapshot identity + provider cache-check depend only on the repo

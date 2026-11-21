@@ -57,6 +57,12 @@ function daytonaApiBase(): string {
 // same way.
 const DAYTONA_REST_CALL_TIMEOUT_MS = configuredTimeoutMs('KORTIX_DAYTONA_CALL_TIMEOUT_MS', 20_000, 1_000);
 
+function resolveDaytonaKey(apiKeyOverride?: string): string {
+  const key = apiKeyOverride?.trim() || config.DAYTONA_API_KEY;
+  if (!key) throw new Error('Missing DAYTONA_API_KEY');
+  return key;
+}
+
 /**
  * List every snapshot in the org via the REST API (the SDK exposes no stable
  * paginated list). Walks all pages. Used by snapshot reconciliation to detect
@@ -64,15 +70,15 @@ const DAYTONA_REST_CALL_TIMEOUT_MS = configuredTimeoutMs('KORTIX_DAYTONA_CALL_TI
  * failure so callers can skip destructive reconciliation when the view is
  * incomplete (never delete based on a partial list).
  */
-export async function listDaytonaSnapshots(): Promise<DaytonaSnapshotSummary[]> {
-  if (!config.DAYTONA_API_KEY) throw new Error('Missing DAYTONA_API_KEY');
+export async function listDaytonaSnapshots(apiKeyOverride?: string): Promise<DaytonaSnapshotSummary[]> {
+  const apiKey = resolveDaytonaKey(apiKeyOverride);
   const base = daytonaApiBase();
   const out: DaytonaSnapshotSummary[] = [];
   let page = 1;
   // Hard cap on pages so a misbehaving API can't spin us forever.
   for (let guard = 0; guard < 100; guard++) {
     const res = await fetch(`${base}/snapshots?limit=200&page=${page}`, {
-      headers: { Authorization: `Bearer ${config.DAYTONA_API_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
     });
     if (!res.ok) {
@@ -104,12 +110,13 @@ export async function listDaytonaSnapshots(): Promise<DaytonaSnapshotSummary[]> 
  * snapshot is already gone (404); false on any other failure. Best-effort —
  * never throws so batch reconciliation can continue past a single bad row.
  */
-export async function deleteDaytonaSnapshotById(id: string): Promise<boolean> {
-  if (!config.DAYTONA_API_KEY) return false;
+export async function deleteDaytonaSnapshotById(id: string, apiKeyOverride?: string): Promise<boolean> {
+  const apiKey = apiKeyOverride?.trim() || config.DAYTONA_API_KEY;
+  if (!apiKey) return false;
   try {
     const res = await fetch(`${daytonaApiBase()}/snapshots/${id}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${config.DAYTONA_API_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
     });
     return res.ok || res.status === 404;
@@ -167,8 +174,9 @@ export interface DaytonaStartedSandboxSummary {
  */
 export async function listStartedDaytonaSandboxesOldestFirst(
   maxItems: number,
+  apiKeyOverride?: string,
 ): Promise<DaytonaStartedSandboxSummary[]> {
-  if (!config.DAYTONA_API_KEY) throw new Error('Missing DAYTONA_API_KEY');
+  const apiKey = resolveDaytonaKey(apiKeyOverride);
   const base = daytonaApiBase();
   const out: DaytonaStartedSandboxSummary[] = [];
   let cursor: string | null = null;
@@ -180,7 +188,7 @@ export async function listStartedDaytonaSandboxesOldestFirst(
     url.searchParams.set('order', 'asc');
     if (cursor) url.searchParams.set('cursor', cursor);
     const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${config.DAYTONA_API_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
     });
     if (!res.ok) {
@@ -219,12 +227,13 @@ export async function listStartedDaytonaSandboxesOldestFirst(
  * Stop a running Daytona sandbox via REST API (reversible — preserves disk and
  * session log; frees CPU/RAM immediately once stopped).
  */
-export async function stopDaytonaSandboxById(id: string): Promise<boolean> {
-  if (!config.DAYTONA_API_KEY) return false;
+export async function stopDaytonaSandboxById(id: string, apiKeyOverride?: string): Promise<boolean> {
+  const apiKey = apiKeyOverride?.trim() || config.DAYTONA_API_KEY;
+  if (!apiKey) return false;
   try {
     const res = await fetch(`${daytonaApiBase()}/sandbox/${id}/stop`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${config.DAYTONA_API_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
     });
     return res.ok || res.status === 404 || res.status === 409;
@@ -234,11 +243,12 @@ export async function stopDaytonaSandboxById(id: string): Promise<boolean> {
 }
 
 /** Read a Daytona sandbox's current state string via REST API, or null on 404/error. */
-export async function getDaytonaSandboxStateById(id: string): Promise<string | null> {
-  if (!config.DAYTONA_API_KEY) return null;
+export async function getDaytonaSandboxStateById(id: string, apiKeyOverride?: string): Promise<string | null> {
+  const apiKey = apiKeyOverride?.trim() || config.DAYTONA_API_KEY;
+  if (!apiKey) return null;
   try {
     const res = await fetch(`${daytonaApiBase()}/sandbox/${id}`, {
-      headers: { Authorization: `Bearer ${config.DAYTONA_API_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
     });
     if (!res.ok) return null;
@@ -265,8 +275,9 @@ export interface DaytonaStoppedSandboxSummary {
  */
 export async function listStoppedDaytonaSandboxesOldestFirst(
   maxItems: number,
+  apiKeyOverride?: string,
 ): Promise<DaytonaStoppedSandboxSummary[]> {
-  if (!config.DAYTONA_API_KEY) throw new Error('Missing DAYTONA_API_KEY');
+  const apiKey = resolveDaytonaKey(apiKeyOverride);
   const base = daytonaApiBase();
   const out: DaytonaStoppedSandboxSummary[] = [];
   let cursor: string | null = null;
@@ -278,7 +289,7 @@ export async function listStoppedDaytonaSandboxesOldestFirst(
     url.searchParams.set('order', 'asc');
     if (cursor) url.searchParams.set('cursor', cursor);
     const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${config.DAYTONA_API_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
     });
     if (!res.ok) {
@@ -312,12 +323,13 @@ export async function listStoppedDaytonaSandboxesOldestFirst(
  * which the caller should just skip rather than treat as fatal. Best-effort —
  * never throws so a batch sweep continues past a single bad row.
  */
-export async function archiveDaytonaSandboxById(id: string): Promise<boolean> {
-  if (!config.DAYTONA_API_KEY) return false;
+export async function archiveDaytonaSandboxById(id: string, apiKeyOverride?: string): Promise<boolean> {
+  const apiKey = apiKeyOverride?.trim() || config.DAYTONA_API_KEY;
+  if (!apiKey) return false;
   try {
     const res = await fetch(`${daytonaApiBase()}/sandbox/${id}/archive`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${config.DAYTONA_API_KEY}` },
+      headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
     });
     return res.ok || res.status === 404 || res.status === 409;

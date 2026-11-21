@@ -91,6 +91,11 @@ import {
 import { createClient } from '@/lib/supabase/client';
 import { cn } from '@kortix/ui';
 import { SettingsTabHeader } from '@kortix/ui/customize/settings/settings-tab-header';
+import { DaytonaStepCard } from '@/features/auth/daytona-step';
+import {
+  DAYTONA_STATUS_QUERY_KEY,
+  fetchDaytonaOnboardingStatus,
+} from '@/lib/onboarding/daytona-client';
 import { isOfflineUploadError } from './avatar-upload-error';
 
 const PROFILE_QUERY_KEY = ['account', 'profile'] as const;
@@ -236,6 +241,14 @@ interface ProfileTabViewProps {
   // Email
   userEmail?: string;
 
+  // Cloud computer (per-user Daytona workspace)
+  cloudComputerStatusLabel?: string;
+  cloudComputerDescription?: string;
+  showReconnectDaytonaModal?: boolean;
+  onOpenReconnectDaytona?: () => void;
+  onCloseReconnectDaytona?: () => void;
+  onReconnectDaytonaComplete?: () => void;
+
   // Delete account
   /**
    * The person belongs to no workspace (Workspaces D3). The dialog stays the
@@ -355,6 +368,12 @@ export function ProfileTabView({
   isSavingName = false,
   onSaveName = () => {},
   userEmail = '',
+  cloudComputerStatusLabel,
+  cloudComputerDescription,
+  showReconnectDaytonaModal = false,
+  onOpenReconnectDaytona,
+  onCloseReconnectDaytona = () => {},
+  onReconnectDaytonaComplete = () => {},
   noWorkspace = false,
   deletionPlan,
   accountDeletionSupported = true,
@@ -495,7 +514,43 @@ export function ProfileTabView({
             </Button>
           ) : null}
         </SettingsRow>
+
+        {cloudComputerStatusLabel ? (
+          <SettingsRow
+            label="Cloud computer"
+            description={cloudComputerDescription || cloudComputerStatusLabel}
+          >
+            <span className="text-muted-foreground my-auto text-sm">
+              {cloudComputerStatusLabel}
+            </span>
+            {onOpenReconnectDaytona ? (
+              <Button type="button" variant="outline" size="sm" onClick={onOpenReconnectDaytona}>
+                Reconnect Daytona
+              </Button>
+            ) : null}
+          </SettingsRow>
+        ) : null}
       </SettingsRowGroup>
+
+      {showReconnectDaytonaModal ? (
+        <Modal
+          open={showReconnectDaytonaModal}
+          onOpenChange={(open) => !open && onCloseReconnectDaytona()}
+        >
+          <ModalContent className="lg:max-w-md" variant="base">
+            <ModalBody className="pt-6">
+              <DaytonaStepCard
+                mode="reconnect"
+                onComplete={() => {
+                  onReconnectDaytonaComplete();
+                  onCloseReconnectDaytona();
+                }}
+                onCancel={onCloseReconnectDaytona}
+              />
+            </ModalBody>
+          </ModalContent>
+        </Modal>
+      ) : null}
 
       {/* No workspace list here: the rail lists every workspace with its
           role, one click away, and closes this dialog on the way (finding 37). */}
@@ -801,6 +856,28 @@ export function ProfileTab() {
     uploadAvatarMutation.mutate(file);
   };
 
+  // --- Cloud computer (per-user Daytona status) -------------------------
+  const daytonaStatusQuery = useQuery({
+    queryKey: DAYTONA_STATUS_QUERY_KEY,
+    queryFn: fetchDaytonaOnboardingStatus,
+    staleTime: 15_000,
+    retry: 1,
+  });
+  const [showReconnectDaytonaModal, setShowReconnectDaytonaModal] = useState(false);
+
+  const cloudComputerStatusLabel = daytonaStatusQuery.isPending
+    ? 'Checking…'
+    : daytonaStatusQuery.data?.connected && !daytonaStatusQuery.data.reconnectRequired
+      ? 'Connected (Daytona)'
+      : daytonaStatusQuery.data?.reconnectRequired
+        ? 'Reconnect required'
+        : 'Not connected';
+
+  const cloudComputerDescription =
+    daytonaStatusQuery.data?.connected && !daytonaStatusQuery.data.reconnectRequired
+      ? `Your private Daytona workspace (${daytonaStatusQuery.data.region || 'eu'}).`
+      : 'Connect your personal Daytona workspace to run private cloud sandboxes.';
+
   // --- Organizations ----------------------------------------------------
   // Same account-list entry `WorkspaceSwitcher` already primed on mount, so
   // this costs no extra request inside a project shell.
@@ -945,6 +1022,15 @@ export function ProfileTab() {
       isSavingName={saveNameMutation.isPending}
       onSaveName={() => saveNameMutation.mutate(nameDraft)}
       userEmail={profileQuery.data?.email ?? ''}
+      cloudComputerStatusLabel={cloudComputerStatusLabel}
+      cloudComputerDescription={cloudComputerDescription}
+      showReconnectDaytonaModal={showReconnectDaytonaModal}
+      onOpenReconnectDaytona={() => setShowReconnectDaytonaModal(true)}
+      onCloseReconnectDaytona={() => setShowReconnectDaytonaModal(false)}
+      onReconnectDaytonaComplete={() => {
+        successToast('Daytona workspace connected');
+        void queryClient.invalidateQueries({ queryKey: DAYTONA_STATUS_QUERY_KEY });
+      }}
       noWorkspace={noWorkspace}
       deletionPlan={deletionPlan}
       accountDeletionSupported={accountDeletionSupported}

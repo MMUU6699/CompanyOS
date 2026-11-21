@@ -21,6 +21,7 @@ import {
   BellIcon as Bell,
   BookOpenIcon as BookOpen,
   CaretRightIcon as ChevronRight,
+  CpuIcon as Cpu,
   GlobeIcon as Globe,
   LifebuoyIcon as LifeBuoy,
   SignOutIcon as LogOut,
@@ -28,6 +29,8 @@ import {
   SquaresFourIcon as SquaresFour,
   UsersIcon as Users,
 } from '@/lib/icons';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
   AlertDialog,
@@ -53,7 +56,12 @@ import {
   SettingsPage,
   SettingsRow,
 } from '@/components/kortix/settings-list';
-import type { SheetRef } from '@/components/kortix/sheet';
+import { Sheet, SheetBody, SheetHeader, type SheetRef } from '@/components/kortix/sheet';
+import { DaytonaStepView } from '@/components/auth/DaytonaStepView';
+import {
+  DAYTONA_STATUS_QUERY_KEY,
+  fetchDaytonaOnboardingStatus,
+} from '@/lib/onboarding/daytona-client';
 import { PricingTierBadge } from '@/components/billing/PricingTierBadge';
 import { EditProfileSheet } from '@/components/settings/EditProfileSheet';
 import { ProfilePicture } from '@/components/settings/ProfilePicture';
@@ -96,6 +104,25 @@ export function AccountPage({
 
   const profile = useProfileEditor();
   const editProfileRef = React.useRef<SheetRef>(null);
+  const reconnectDaytonaRef = React.useRef<SheetRef>(null);
+  const insets = useSafeAreaInsets();
+  const queryClient = useQueryClient();
+
+  const daytonaStatusQuery = useQuery({
+    queryKey: DAYTONA_STATUS_QUERY_KEY,
+    queryFn: fetchDaytonaOnboardingStatus,
+    enabled: !!user,
+    staleTime: 15_000,
+    retry: 1,
+  });
+
+  const daytonaStatusLabel = daytonaStatusQuery.isPending
+    ? 'Checking…'
+    : daytonaStatusQuery.data?.connected && !daytonaStatusQuery.data.reconnectRequired
+      ? 'Connected (Daytona)'
+      : daytonaStatusQuery.data?.reconnectRequired
+        ? 'Reconnect required'
+        : 'Not connected';
 
   const { account: activeAccount } = useActiveAccount();
   // Plan of the active account, shown as the plan badge next to its name.
@@ -174,7 +201,7 @@ export function AccountPage({
   return (
     <View className="flex-1 bg-background">
       <SettingsHeader title={title} onOpenMenu={onOpenMenu} />
-      <SettingsPage>
+      <SettingsPage paddingBottom={Math.max(insets.bottom, 20) + 36}>
         {/* Profile tile: photo, name over email — opens EditProfileSheet. */}
         <SettingsGroup>
           <ProfileTile
@@ -209,6 +236,17 @@ export function AccountPage({
               </View>
             }
           />
+          {!!user && (
+            <SettingsRow
+              icon={Cpu}
+              label="Cloud computer"
+              value={daytonaStatusLabel}
+              onPress={() => {
+                haptics.tap();
+                reconnectDaytonaRef.current?.open();
+              }}
+            />
+          )}
         </SettingsGroup>
 
         <SettingsGroup title={t('account.preferences', 'Preferences')}>
@@ -273,6 +311,24 @@ export function AccountPage({
         uploading={profile.isUploadingPhoto}
         onChangePhoto={profile.changePhoto}
       />
+
+      <Sheet ref={reconnectDaytonaRef} enablePanDownToClose>
+        <SheetHeader title="Cloud computer" />
+        <SheetBody>
+          <DaytonaStepView
+            mode="reconnect"
+            onComplete={({ status }) => {
+              if (status) {
+                queryClient.setQueryData(DAYTONA_STATUS_QUERY_KEY, status);
+              }
+              void queryClient.invalidateQueries({ queryKey: DAYTONA_STATUS_QUERY_KEY });
+              reconnectDaytonaRef.current?.close();
+            }}
+            onCancel={() => reconnectDaytonaRef.current?.close()}
+          />
+        </SheetBody>
+        <View style={{ height: insets.bottom }} />
+      </Sheet>
 
       <AlertDialog
         open={signOutOpen}

@@ -119,6 +119,10 @@ import { createCliDeviceRouter } from './cli/device-routes';
 app.route('/v1/cli/device', createCliDeviceRouter());
 import { createCliSetupEventsApp } from './cli/setup-events';
 app.route('/v1/cli/setup-events', createCliSetupEventsApp()); // POST: guided-setup milestones from the CLI, to product analytics
+// Per-user multi-tenant Daytona onboarding (WorkOS Device Flow -> auto API key -> GHCR snapshot).
+// /start and /poll are public (Step 1 before Kortix login); /claim, /status, /manual-key, /disconnect require supabaseAuth.
+import { daytonaOnboardingApp } from './onboarding/daytona-routes';
+app.route('/v1/onboarding/daytona', daytonaOnboardingApp);
 
 // /v1/accounts/* — account & member management lives in ./accounts router.
 // Permanent legacy name: the workspace-scoped families are also served under

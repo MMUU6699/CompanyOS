@@ -129,7 +129,7 @@ export function SettingsPage({
       contentInsetAdjustmentBehavior={contentInsetAdjustmentBehavior}
       contentContainerStyle={{
         flexGrow: hero ? 1 : undefined,
-        paddingBottom: paddingBottom ?? insets.bottom + 28,
+        paddingBottom: paddingBottom ?? Math.max(insets.bottom, 16) + 32,
       }}>
       {hero}
       <View
@@ -379,21 +379,21 @@ export function SettingsRow({
           <View className="mr-3 min-w-5 items-center">{leadingContent}</View>
         ) : null}
 
-        <View className="flex-1">
+        <View className="min-w-0 flex-1">
           <View className="flex-row items-center">
             <Text
               className={cn(
                 destructive ? 'text-destructive' : 'text-foreground',
-                multiline && 'flex-1',
-                labelAccessory != null && 'shrink',
+                multiline ? 'flex-1' : 'shrink',
                 labelClassName,
               )}
-              numberOfLines={multiline ? undefined : 1}>
+              numberOfLines={multiline ? undefined : 1}
+              ellipsizeMode="tail">
               {label}
             </Text>
             {labelAccessory != null ? <View className="ml-2 shrink-0">{labelAccessory}</View> : null}
             {badge ? (
-              <View className="ml-2 rounded-full bg-destructive/15 px-2 py-0.5">
+              <View className="ml-2 shrink-0 rounded-full bg-destructive/15 px-2 py-0.5">
                 <Text className="font-roobert-medium text-[10px] text-destructive">{badge}</Text>
               </View>
             ) : null}
@@ -408,17 +408,23 @@ export function SettingsRow({
         {value ? (
           <Text
             variant="muted"
-            className={valueDestructive ? 'ml-3 max-w-[60%] text-destructive' : 'ml-3 max-w-[60%]'}
-            numberOfLines={1}>
+            className={
+              valueDestructive
+                ? 'ml-3 max-w-[46%] shrink text-right text-destructive'
+                : 'ml-3 max-w-[46%] shrink text-right'
+            }
+            style={{ flexShrink: 1 }}
+            numberOfLines={1}
+            ellipsizeMode="tail">
             {value}
           </Text>
         ) : null}
         {checked ? (
-          <View className="ml-3">
+          <View className="ml-3 shrink-0">
             <Icon as={Check} className="text-primary" size={TRAILING_ICON_SIZE} />
           </View>
         ) : null}
-        {trailing ? <View className="ml-3">{trailing}</View> : null}
+        {trailing ? <View className="ml-3 shrink-0">{trailing}</View> : null}
       </View>
     </Pressable>
   );

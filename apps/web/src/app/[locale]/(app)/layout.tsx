@@ -4,6 +4,7 @@ import { DesktopQuickEntry } from '@/components/desktop/desktop-quick-entry';
 import { AccountHubRouter } from '@/features/accounts/hub/account-hub-router';
 import { BillingReturnWatcher } from '@/features/billing/billing-return';
 import { ExtensionPanelIdentity } from '@/features/chrome/extension-panel-identity';
+import { DaytonaOnboardingGate } from '@/features/auth/daytona-step';
 import { MfaGate } from '@/features/auth/mfa-step-up';
 import { NotificationHost } from '@/features/notifications/notification-host';
 import { ProjectSwitchWatcher } from '@/features/workspace/project-switch-watcher';
@@ -56,7 +57,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       {/* The app is gated on the TOTP step-up: an aal1 session with a verified
           second factor gets the code prompt instead of these routes until the
           session is aal2 (KRTX-1386). */}
-      <MfaGate>{children}</MfaGate>
+      <MfaGate>
+        <DaytonaOnboardingGate>{children}</DaytonaOnboardingGate>
+      </MfaGate>
     </>
   );
 }

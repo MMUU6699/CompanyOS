@@ -25,6 +25,16 @@ import {
   listStoppedDaytonaSandboxesOldestFirst,
   stopDaytonaSandboxById,
 } from '../../shared/daytona';
+import {
+  DaytonaReconnectRequiredError,
+  ensureUserSnapshotActive,
+  invalidateUserDaytonaCache,
+  isDaytonaCredentialRejectedError,
+  rememberExternalIdOwner,
+  resolveDaytonaContextForExternalId,
+  resolveDaytonaContextForOwner,
+  type UserDaytonaContext,
+} from '../../onboarding/daytona-service';
 import { configuredTimeoutMs, withTimeout } from '../../shared/with-timeout';
 import { serviceKeyForExternalId } from '../service-key';
 import { sandboxFrontendBaseUrl } from '../sandbox-frontend-url';
@@ -70,18 +80,29 @@ const LIST_OPERATION_TIMEOUT_MS = configuredTimeoutMs(
   PROVIDER_CALL_TIMEOUT_MS,
 );
 
-const diskQuotaGuardDeps = {
-  list: listStoppedDaytonaSandboxesOldestFirst,
-  archive: archiveDaytonaSandboxById,
-};
+function buildDiskQuotaGuardDeps(apiKey?: string) {
+  return {
+    list: (maxItems: number) => listStoppedDaytonaSandboxesOldestFirst(maxItems, apiKey),
+    archive: (id: string) => archiveDaytonaSandboxById(id, apiKey),
+  };
+}
 
-const slotManagerDeps = {
-  listStarted: listStartedDaytonaSandboxesOldestFirst,
-  listStopped: listStoppedDaytonaSandboxesOldestFirst,
-  stop: stopDaytonaSandboxById,
-  archive: archiveDaytonaSandboxById,
-  getState: getDaytonaSandboxStateById,
-};
+function buildSlotManagerDeps(apiKey?: string) {
+  return {
+    listStarted: (maxItems: number) => listStartedDaytonaSandboxesOldestFirst(maxItems, apiKey),
+    listStopped: (maxItems: number) => listStoppedDaytonaSandboxesOldestFirst(maxItems, apiKey),
+    stop: (id: string) => stopDaytonaSandboxById(id, apiKey),
+    archive: (id: string) => archiveDaytonaSandboxById(id, apiKey),
+    getState: (id: string) => getDaytonaSandboxStateById(id, apiKey),
+  };
+}
+
+function handleUserAuthFailure(err: unknown, userCtx: UserDaytonaContext | null): void {
+  if (userCtx && isDaytonaCredentialRejectedError(err)) {
+    invalidateUserDaytonaCache(userCtx.userId);
+    throw new DaytonaReconnectRequiredError();
+  }
+}
 
 function isTransientDaytonaWakeError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
@@ -103,24 +124,30 @@ function isTransientDaytonaWakeError(err: unknown): boolean {
 
 /**
  * Proactive LRU slot check + reactive quota/transient retry wrapper shared by
- * Daytona `create()` and `start()`.
+ * Daytona `create()` and `start()`. Partitioned strictly per `daytonaOrgId` so
+ * User A never blocks or evicts User B.
  */
 async function runWithDaytonaQuotaRetry<T>(
   reason: string,
   excludeExternalId: string | undefined,
+  userCtx: UserDaytonaContext | null,
   op: () => Promise<T>,
 ): Promise<T> {
+  const slotManagerDeps = buildSlotManagerDeps(userCtx?.apiKey);
+  const partitionKey = userCtx?.daytonaOrgId ?? 'global';
+  const maxRunning = userCtx ? 2 : config.KORTIX_DAYTONA_MAX_RUNNING_SANDBOXES;
+  const maxNonArchived = userCtx ? 2 : config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES;
+
   await ensureDaytonaCapacitySlot(
     reason,
     slotManagerDeps,
-    {
-      maxRunning: config.KORTIX_DAYTONA_MAX_RUNNING_SANDBOXES,
-      maxNonArchived: config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES,
-    },
+    { maxRunning, maxNonArchived },
     excludeExternalId,
+    partitionKey,
   ).catch((err: unknown) => {
+    handleUserAuthFailure(err, userCtx);
     console.warn(
-      `[DAYTONA] proactive LRU slot check (${reason}) skipped:`,
+      `[DAYTONA:${partitionKey}] proactive LRU slot check (${reason}) skipped:`,
       err instanceof Error ? err.message : String(err),
     );
   });
@@ -130,12 +157,15 @@ async function runWithDaytonaQuotaRetry<T>(
     try {
       return await op();
     } catch (err) {
+      handleUserAuthFailure(err, userCtx);
       if (attempt < maxAttempts) {
         if (isDaytonaDiskQuotaError(err)) {
           const reclaim = await reclaimDaytonaDiskSlots(
             `${reason}:attempt-${attempt}`,
             slotManagerDeps,
             excludeExternalId,
+            undefined,
+            partitionKey,
           );
           if (reclaim.archivedIds.length > 0) {
             for (const id of reclaim.archivedIds) runningStatusCache.delete(id);
@@ -146,6 +176,7 @@ async function runWithDaytonaQuotaRetry<T>(
             `${reason}:attempt-${attempt}`,
             slotManagerDeps,
             excludeExternalId,
+            partitionKey,
           );
           if (eviction.evictedIds.length > 0) {
             for (const id of eviction.evictedIds) runningStatusCache.delete(id);
@@ -154,14 +185,14 @@ async function runWithDaytonaQuotaRetry<T>(
         } else if (isTransientDaytonaWakeError(err)) {
           const delayMs = attempt * 1_500;
           console.warn(
-            `[DAYTONA] transient error on ${reason} (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`,
+            `[DAYTONA:${partitionKey}] transient error on ${reason} (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`,
             err instanceof Error ? err.message : String(err),
           );
           await new Promise((r) => setTimeout(r, delayMs));
           continue;
         }
       }
-      reportIfDiskQuotaError(err, reason);
+      reportIfDiskQuotaError(err, reason, userCtx?.apiKey);
     }
   }
   throw new Error(`Daytona ${reason} exhausted retries`);
@@ -174,13 +205,13 @@ async function runWithDaytonaQuotaRetry<T>(
  * single-flight gated so a burst of concurrent failures triggers it once.
  * Always rethrows — this never rescues the request that hit the error.
  */
-function reportIfDiskQuotaError(err: unknown, reason: string): never {
+function reportIfDiskQuotaError(err: unknown, reason: string, apiKey?: string): never {
   console.error(
     `[DAYTONA] ${reason} failed:`,
     err instanceof Error ? err.message : String(err),
   );
   if (isDaytonaDiskQuotaError(err)) {
-    triggerEmergencyDiskArchiveSweep(reason, diskQuotaGuardDeps);
+    triggerEmergencyDiskArchiveSweep(reason, buildDiskQuotaGuardDeps(apiKey));
   }
   throw err;
 }
@@ -251,7 +282,8 @@ export function repairDaytonaDesktopIfStale(externalId: string): Promise<boolean
   desktopRepairCooldown.set(externalId, Date.now());
   const task = (async () => {
     try {
-      const daytona = getDaytona();
+      const userCtx = await resolveDaytonaContextForExternalId(externalId).catch(() => null);
+      const daytona = userCtx?.client ?? getDaytona();
       const sandbox = await withTimeout(
         daytona.get(externalId),
         DESKTOP_REPAIR_TIMEOUT_MS,
@@ -368,14 +400,22 @@ export class DaytonaProvider implements SandboxProvider {
     };
     assertWorkloadCredential(this.name, opts, envVars);
 
-    // Every Daytona sandbox boots from its project's own per-project
-    // snapshot (`kortix-snap-…`), resolved by the snapshot builder before
-    // we get here (see platform/services/session-sandbox.ts +
-    // snapshots/builder.ts). There is intentionally no shared platform
-    // fallback: a missing snapshot means the project's first build
-    // hasn't finished, which is a session-creation error — not something
-    // we paper over with an unrelated image.
-    const snapshot = opts.snapshot;
+    const userCtx = await resolveDaytonaContextForOwner({
+      userId: opts.userId,
+      accountId: opts.accountId,
+    });
+
+    // Resolve the snapshot to boot from:
+    // - If the workspace owner connected their own Daytona account, ensure
+    //   the pinned GHCR snapshot is active in THEIR org (auto-activating if
+    //   Daytona deactivated it after 14 days).
+    // - Otherwise fall back to the caller-supplied opts.snapshot on the
+    //   legacy deployment Daytona org.
+    let snapshot = opts.snapshot;
+    if (userCtx) {
+      const ensured = await ensureUserSnapshotActive(userCtx);
+      snapshot = ensured.snapshotName;
+    }
     if (!snapshot) {
       throw new Error(
         'Daytona create() called without opts.snapshot. ' +
@@ -384,18 +424,19 @@ export class DaytonaProvider implements SandboxProvider {
       );
     }
 
-    const daytona = getDaytona();
+    const daytona = userCtx?.client ?? getDaytona();
     const labels = await managedSandboxLabels(workloadType);
+    const lifecycle = userCtx
+      ? {
+          autoStopInterval: Math.max(1, Math.min(opts.autoStopInterval ?? 5, 5)),
+          autoArchiveInterval: Math.max(1, Math.min(config.KORTIX_SANDBOX_AUTOARCHIVE_MINUTES, 5)),
+          autoDeleteInterval: config.KORTIX_SANDBOX_AUTODELETE_MINUTES,
+        }
+      : daytonaLifecycle(opts.autoStopInterval);
     const createParams = {
       snapshot,
       envVars,
-      // Idle → stop → archive → delete. See daytonaLifecycle(): auto-stop is
-      // clamped to >= 1 so a normal session box can never be created persistent,
-      // a large auto-archive (default 3 days) keeps a hibernated box in the
-      // fast-resume "stopped" tier, and a finite auto-delete reclaims it if the
-      // API/tunnel that created it dies. Intervals are env-tunable
-      // (KORTIX_SANDBOX_AUTO*).
-      ...daytonaLifecycle(opts.autoStopInterval),
+      ...lifecycle,
       labels,
       public: false,
     };
@@ -403,9 +444,15 @@ export class DaytonaProvider implements SandboxProvider {
     const runCreate = () =>
       daytona.create(createParams, { timeout: createTimeoutSeconds });
 
-    const daytonaSandbox = await runWithDaytonaQuotaRetry('create', undefined, runCreate);
+    const daytonaSandbox = await runWithDaytonaQuotaRetry('create', undefined, userCtx, runCreate);
 
     const externalId = daytonaSandbox.id;
+    if (userCtx) {
+      rememberExternalIdOwner(externalId, userCtx.userId, userCtx.daytonaOrgId);
+      console.log(
+        `[DAYTONA] created sandbox ${externalId} in user org ${userCtx.daytonaOrgId} (region=${userCtx.daytonaRegion}, snapshot=${snapshot})`,
+      );
+    }
     const apiBase = sandboxApiBase;
     const ingressPort = workloadType === 'app' ? 8080 : 8000;
     const baseUrl = `${apiBase}/v1/p/${externalId}/${ingressPort}`;
@@ -442,6 +489,13 @@ export class DaytonaProvider implements SandboxProvider {
       metadata: {
         provisionedBy: opts.userId,
         daytonaSandboxId: externalId,
+        ...(userCtx
+          ? {
+              daytonaOrgId: userCtx.daytonaOrgId,
+              daytonaOwnerUserId: userCtx.userId,
+              daytonaRegion: userCtx.daytonaRegion,
+            }
+          : {}),
         snapshot,
         version: SANDBOX_VERSION,
         workloadType,
@@ -455,7 +509,8 @@ export class DaytonaProvider implements SandboxProvider {
    * wake. The PID-file check makes concurrent and repeated calls idempotent.
    */
   async ensureAppRuntimeStarted(externalId: string): Promise<void> {
-    const daytona = getDaytona();
+    const userCtx = await resolveDaytonaContextForExternalId(externalId).catch(() => null);
+    const daytona = userCtx?.client ?? getDaytona();
     const sandbox = await withTimeout(
       daytona.get(externalId),
       PROVIDER_CALL_TIMEOUT_MS,
@@ -479,7 +534,8 @@ export class DaytonaProvider implements SandboxProvider {
     command: string[],
     opts: SandboxExecOptions,
   ): Promise<SandboxExecResult> {
-    const daytona = getDaytona();
+    const userCtx = await resolveDaytonaContextForExternalId(externalId).catch(() => null);
+    const daytona = userCtx?.client ?? getDaytona();
     const sandbox = await withTimeout(
       daytona.get(externalId),
       PROVIDER_CALL_TIMEOUT_MS,
@@ -496,19 +552,26 @@ export class DaytonaProvider implements SandboxProvider {
 
   async start(externalId: string): Promise<void> {
     runningStatusCache.delete(externalId);
-    const daytona = getDaytona();
-    const sandbox = await withTimeout(
-      daytona.get(externalId),
-      PROVIDER_CALL_TIMEOUT_MS,
-      `Daytona get(${externalId})`,
-    );
+    const userCtx = await resolveDaytonaContextForExternalId(externalId);
+    const daytona = userCtx?.client ?? getDaytona();
+    let sandbox: Awaited<ReturnType<typeof daytona.get>>;
+    try {
+      sandbox = await withTimeout(
+        daytona.get(externalId),
+        PROVIDER_CALL_TIMEOUT_MS,
+        `Daytona get(${externalId})`,
+      );
+    } catch (err) {
+      handleUserAuthFailure(err, userCtx);
+      throw err;
+    }
     const runStart = () =>
       withTimeout(
         sandbox.start(),
         PROVIDER_CALL_TIMEOUT_MS,
         `Daytona start(${externalId})`,
       );
-    await runWithDaytonaQuotaRetry(`resume:${externalId}`, externalId, runStart);
+    await runWithDaytonaQuotaRetry(`resume:${externalId}`, externalId, userCtx, runStart);
     // Daytona preserves /tmp/.X1-lock across stop→start, which kills Xvfb :1
     // on existing images; heal asynchronously right after resume so Desktop
     // (:6901) is up immediately without delaying the wake response.
@@ -517,7 +580,8 @@ export class DaytonaProvider implements SandboxProvider {
   }
 
   async renewLifecycle(externalId: string): Promise<void> {
-    const daytona = getDaytona();
+    const userCtx = await resolveDaytonaContextForExternalId(externalId).catch(() => null);
+    const daytona = userCtx?.client ?? getDaytona();
     const sandbox = await withTimeout(
       daytona.get(externalId),
       PROVIDER_CALL_TIMEOUT_MS,
@@ -538,7 +602,8 @@ export class DaytonaProvider implements SandboxProvider {
 
   async stop(externalId: string): Promise<void> {
     runningStatusCache.delete(externalId);
-    const daytona = getDaytona();
+    const userCtx = await resolveDaytonaContextForExternalId(externalId).catch(() => null);
+    const daytona = userCtx?.client ?? getDaytona();
     const sandbox = await withTimeout(
       daytona.get(externalId),
       PROVIDER_CALL_TIMEOUT_MS,
@@ -557,7 +622,8 @@ export class DaytonaProvider implements SandboxProvider {
 
   async remove(externalId: string): Promise<void> {
     runningStatusCache.delete(externalId);
-    const daytona = getDaytona();
+    const userCtx = await resolveDaytonaContextForExternalId(externalId).catch(() => null);
+    const daytona = userCtx?.client ?? getDaytona();
     const sandbox = await withTimeout(
       daytona.get(externalId),
       PROVIDER_CALL_TIMEOUT_MS,
@@ -609,7 +675,8 @@ export class DaytonaProvider implements SandboxProvider {
     const cachedAt = runningStatusCache.get(externalId);
     if (cachedAt !== undefined && Date.now() - cachedAt < STATUS_CACHE_TTL_MS) return 'running';
     try {
-      const daytona = getDaytona();
+      const userCtx = await resolveDaytonaContextForExternalId(externalId).catch(() => null);
+      const daytona = userCtx?.client ?? getDaytona();
       const sandbox = await withTimeout(
         daytona.get(externalId),
         PROVIDER_CALL_TIMEOUT_MS,
@@ -633,12 +700,19 @@ export class DaytonaProvider implements SandboxProvider {
     externalId: string,
     request: SandboxIngressRequest,
   ): Promise<ResolvedSandboxIngress> {
-    const daytona = getDaytona();
-    const sandbox = await withTimeout(
-      daytona.get(externalId),
-      PROVIDER_CALL_TIMEOUT_MS,
-      `Daytona get(${externalId})`,
-    );
+    const userCtx = await resolveDaytonaContextForExternalId(externalId).catch(() => null);
+    const daytona = userCtx?.client ?? getDaytona();
+    let sandbox: Awaited<ReturnType<typeof daytona.get>>;
+    try {
+      sandbox = await withTimeout(
+        daytona.get(externalId),
+        PROVIDER_CALL_TIMEOUT_MS,
+        `Daytona get(${externalId})`,
+      );
+    } catch (err) {
+      handleUserAuthFailure(err, userCtx);
+      throw err;
+    }
     const link: any = await withTimeout(
       (sandbox as any).getPreviewLink(request.port),
       PROVIDER_CALL_TIMEOUT_MS,

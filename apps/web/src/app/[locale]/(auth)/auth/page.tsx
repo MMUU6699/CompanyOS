@@ -74,9 +74,19 @@ import {
   fetchSamlEnabled,
 } from '@/lib/supabase/client';
 
+import {
+  DaytonaStepCard,
+  DaytonaStepCompleteBanner,
+} from '@/features/auth/daytona-step';
+import {
+  clearPendingDaytonaClaim,
+  clearPendingManualDaytonaKey,
+  hasPendingDaytonaOnboarding,
+} from '@/lib/onboarding/daytona-client';
+
 const GoogleSignIn = lazy(() => import('@/features/auth/google-signin'));
 
-type Step = 'entry' | 'sso' | 'credentials' | 'link';
+type Step = 'daytona' | 'entry' | 'sso' | 'credentials' | 'link';
 
 // The API's per-address window (apps/api/src/auth/email-cooldown.ts): a resend
 // offered sooner would only be answered "already sent".
@@ -249,7 +259,20 @@ function AuthCardForm({
   const magicLinkEnabled = enabledMethods.includes('magic');
   const passwordEnabled = enabledMethods.includes('password');
 
-  const [step, setStep] = useState<Step>('entry');
+  const [daytonaDone, setDaytonaDone] = useState<boolean>(false);
+  const [step, setStep] = useState<Step>(() => {
+    if (mobileCallbackState || mobileSsoEmail || callbackError) {
+      return 'entry';
+    }
+    return 'daytona';
+  });
+
+  useEffect(() => {
+    if (hasPendingDaytonaOnboarding()) {
+      setDaytonaDone(true);
+      setStep((current) => (current === 'daytona' ? 'entry' : current));
+    }
+  }, []);
   const [email, setEmail] = useState('');
   // What the flow knows about the address by the time the password step shows:
   // 'signin' (account exists), 'signup' (new), or 'unknown' (the existence
@@ -1097,10 +1120,38 @@ function AuthCardForm({
     );
   }
 
-  /* ── Entry step ── */
+  /* ── Step 1: Connect Daytona Cloud Computer ── */
+  if (step === 'daytona') {
+    return (
+      <m.div {...rise(0)}>
+        <DaytonaStepCard
+          mode="pre-auth"
+          onComplete={() => {
+            setDaytonaDone(true);
+            setStep('entry');
+          }}
+          onSkipToSignIn={() => {
+            setStep('entry');
+          }}
+        />
+      </m.div>
+    );
+  }
+
+  /* ── Entry step (Step 2: Sign in to Kortix) ── */
   return (
     <>
       <m.div {...rise(0)}>
+        {daytonaDone ? (
+          <DaytonaStepCompleteBanner
+            onReset={() => {
+              clearPendingDaytonaClaim();
+              clearPendingManualDaytonaKey();
+              setDaytonaDone(false);
+              setStep('daytona');
+            }}
+          />
+        ) : null}
         {/* One system: no sign-in/sign-up toggle. Continue routes new emails
             into registration and existing ones into sign-in automatically. */}
         <StepHeader title={t('welcome', { name: brandName })} description={t('automaticAccount')} />
@@ -1167,6 +1218,13 @@ function AuthCardForm({
             self-hosted installs without SSO never show a dead door. */}
         <QuietLinks
           links={[
+            !daytonaDone && !mobileCallbackState
+              ? {
+                  key: 'daytona-step',
+                  label: 'New user? Connect Daytona first (Step 1)',
+                  onClick: () => setStep('daytona'),
+                }
+              : null,
             passwordEnabled && magicLinkEnabled
               ? {
                   key: 'password',

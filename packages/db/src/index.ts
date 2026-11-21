@@ -425,3 +425,4 @@ export type {
 } from './types';
 
 export { userProviderConnections, projectUserProviderConnections, sessionUserProviderConnections } from './schema/kortix';
+export { userDaytonaCredentials, daytonaConnectFlows } from './schema/kortix';

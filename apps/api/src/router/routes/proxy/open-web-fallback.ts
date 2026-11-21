@@ -148,6 +148,102 @@ async function fetchWikipediaOpenSearch(query: string, limit: number, arabic: bo
   }
 }
 
+function unwrapDuckDuckGoUrl(rawHref: string): string {
+  const decoded = decodeHtmlEntities(rawHref).trim();
+  if (!decoded) return '';
+  const normalized = decoded.startsWith('//') ? `https:${decoded}` : decoded;
+  try {
+    const parsed = new URL(normalized, 'https://duckduckgo.com');
+    const uddg = parsed.searchParams.get('uddg');
+    if (uddg && /^https?:\/\//i.test(uddg)) return uddg;
+    if (/^https?:\/\//i.test(parsed.toString()) && !parsed.hostname.endsWith('duckduckgo.com')) {
+      return parsed.toString();
+    }
+  } catch {
+    // fall through
+  }
+  return /^https?:\/\//i.test(normalized) ? normalized : '';
+}
+
+async function fetchDuckDuckGoHtml(query: string, limit: number): Promise<OpenWebSearchResult[]> {
+  const endpoints = [
+    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+    `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`,
+  ];
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        headers: {
+          'User-Agent': BROWSER_USER_AGENT,
+          Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5',
+          'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) continue;
+      const html = await res.text();
+      const out: OpenWebSearchResult[] = [];
+
+      // html.duckduckgo.com result blocks
+      const linkRe = /<a\b[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+      const snippetRe = /<(?:a|div|span)\b[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/(?:a|div|span)>/gi;
+      const snippets: string[] = [];
+      let sm: RegExpExecArray | null;
+      while ((sm = snippetRe.exec(html)) !== null) {
+        snippets.push(stripTags(sm[1]!));
+      }
+      let lm: RegExpExecArray | null;
+      let idx = 0;
+      while ((lm = linkRe.exec(html)) !== null && out.length < limit) {
+        const targetUrl = unwrapDuckDuckGoUrl(lm[1]!);
+        const title = stripTags(lm[2]!);
+        const snippet = snippets[idx] || title;
+        idx += 1;
+        if (!targetUrl || !title) continue;
+        out.push({
+          title,
+          url: targetUrl,
+          content: snippet,
+          score: Math.max(0.55, Number((0.98 - out.length * 0.04).toFixed(2))),
+          published_date: '',
+        });
+      }
+
+      // lite.duckduckgo.com fallback selector
+      if (out.length === 0) {
+        const liteLinkRe = /<a\b[^>]*class=["'][^"']*result-link[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+        const liteSnipRe = /<td\b[^>]*class=["'][^"']*result-snippet[^"']*["'][^>]*>([\s\S]*?)<\/td>/gi;
+        const liteSnips: string[] = [];
+        let lsm: RegExpExecArray | null;
+        while ((lsm = liteSnipRe.exec(html)) !== null) {
+          liteSnips.push(stripTags(lsm[1]!));
+        }
+        let llm: RegExpExecArray | null;
+        let lidx = 0;
+        while ((llm = liteLinkRe.exec(html)) !== null && out.length < limit) {
+          const targetUrl = unwrapDuckDuckGoUrl(llm[1]!);
+          const title = stripTags(llm[2]!);
+          const snippet = liteSnips[lidx] || title;
+          lidx += 1;
+          if (!targetUrl || !title) continue;
+          out.push({
+            title,
+            url: targetUrl,
+            content: snippet,
+            score: Math.max(0.55, Number((0.96 - out.length * 0.04).toFixed(2))),
+            published_date: '',
+          });
+        }
+      }
+
+      if (out.length > 0) return out;
+    } catch {
+      // try next DDG endpoint
+    }
+  }
+  return [];
+}
+
 export async function searchOpenWeb(
   query: string,
   opts: { maxResults?: number; topic?: string } = {},
@@ -160,12 +256,15 @@ export async function searchOpenWeb(
     /\b(news|latest|today|recent|headlines|breaking)\b/i.test(query) ||
     /(أخبار|اخبار|الأخيرة|الاخيرة|اليوم|آخر|اخر|جديد|عاجل)/.test(query);
 
-  const [newsItems, webItems] = await Promise.all([
+  const [ddgItems, newsItems, webItems] = await Promise.all([
+    fetchDuckDuckGoHtml(query, limit),
     fetchGoogleNewsRss(query, limit, hasArabic),
     fetchBingWebRss(query, limit, hasArabic),
   ]);
 
-  const ordered = isNews ? [...newsItems, ...webItems] : [...webItems, ...newsItems];
+  const ordered = isNews
+    ? [...newsItems, ...ddgItems, ...webItems]
+    : [...ddgItems, ...webItems, ...newsItems];
   const seen = new Set<string>();
   const deduped: OpenWebSearchResult[] = [];
   for (const item of ordered) {

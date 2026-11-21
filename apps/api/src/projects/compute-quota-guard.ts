@@ -198,9 +198,11 @@ async function archiveSandboxesLru(
   return { archivedIds, freedDiskGb };
 }
 
-let inFlightCompute: Promise<ComputeQuotaEvictionResult> | null = null;
-let inFlightDisk: Promise<DiskSlotReclaimResult> | null = null;
-let inFlightCapacity: Promise<void> | null = null;
+// Partition single-flight locks strictly per Daytona organization (`partitionKey` = daytonaOrgId)
+// so User A's eviction/reclaim/capacity guard never blocks or evicts User B.
+const inFlightComputeByOrg = new Map<string, Promise<ComputeQuotaEvictionResult>>();
+const inFlightDiskByOrg = new Map<string, Promise<DiskSlotReclaimResult>>();
+const inFlightCapacityByOrg = new Map<string, Promise<void>>();
 
 /**
  * Single-flight reactive eviction: stops the oldest idle running Kortix
@@ -210,30 +212,32 @@ export function evictIdleRunningDaytonaSandboxes(
   reason: string,
   deps: ComputeQuotaGuardDeps,
   excludeExternalId?: string,
+  partitionKey = 'default',
 ): Promise<ComputeQuotaEvictionResult> {
-  if (inFlightCompute) return inFlightCompute;
+  const existing = inFlightComputeByOrg.get(partitionKey);
+  if (existing) return existing;
 
   const run = (async (): Promise<ComputeQuotaEvictionResult> => {
     const startedAll = await deps.listStarted(50);
     const eligible = startedAll.filter((sb) => sb.managed && sb.id !== excludeExternalId);
     if (eligible.length === 0) {
       console.warn(
-        `[daytona-slot-manager] compute quota hit (${reason}) — 0 eligible started Kortix sandboxes to evict`,
+        `[daytona-slot-manager:${partitionKey}] compute quota hit (${reason}) — 0 eligible started Kortix sandboxes to evict`,
       );
       return { runningCount: startedAll.length, evictedIds: [], freedMemoryGb: 0 };
     }
     const { evictedIds, freedMemoryGb } = await stopSandboxesLru(
       eligible,
       MAX_EVICT_PER_PASS,
-      `compute-quota:${reason}`,
+      `compute-quota:${partitionKey}:${reason}`,
       deps,
     );
     return { runningCount: startedAll.length, evictedIds, freedMemoryGb };
   })().finally(() => {
-    inFlightCompute = null;
+    inFlightComputeByOrg.delete(partitionKey);
   });
 
-  inFlightCompute = run;
+  inFlightComputeByOrg.set(partitionKey, run);
   return run;
 }
 
@@ -248,8 +252,10 @@ export function reclaimDaytonaDiskSlots(
   deps: DaytonaSlotManagerDeps,
   excludeExternalId?: string,
   maxToArchive = MAX_EVICT_PER_PASS,
+  partitionKey = 'default',
 ): Promise<DiskSlotReclaimResult> {
-  if (inFlightDisk) return inFlightDisk;
+  const existing = inFlightDiskByOrg.get(partitionKey);
+  if (existing) return existing;
 
   const run = (async (): Promise<DiskSlotReclaimResult> => {
     const stoppedAll = await deps.listStopped(50);
@@ -260,7 +266,7 @@ export function reclaimDaytonaDiskSlots(
       const { archivedIds, freedDiskGb } = await archiveSandboxesLru(
         stoppedKortix,
         maxToArchive,
-        `disk-quota:${reason}`,
+        `disk-quota:${partitionKey}:${reason}`,
         deps,
       );
       return { stoppedCount: stoppedAll.length, archivedIds, freedDiskGb };
@@ -271,26 +277,31 @@ export function reclaimDaytonaDiskSlots(
     const runningKortix = startedAll.filter((sb) => sb.managed && sb.id !== excludeExternalId);
     if (runningKortix.length === 0) {
       console.warn(
-        `[daytona-slot-manager] disk quota hit (${reason}) — 0 Kortix sandboxes available to archive`,
+        `[daytona-slot-manager:${partitionKey}] disk quota hit (${reason}) — 0 Kortix sandboxes available to archive`,
       );
       return { stoppedCount: 0, archivedIds: [], freedDiskGb: 0 };
     }
-    const stoppedRes = await stopSandboxesLru(runningKortix, 1, `disk-quota-stop:${reason}`, deps);
+    const stoppedRes = await stopSandboxesLru(
+      runningKortix,
+      1,
+      `disk-quota-stop:${partitionKey}:${reason}`,
+      deps,
+    );
     if (stoppedRes.evictedIds.length === 0) {
       return { stoppedCount: 0, archivedIds: [], freedDiskGb: 0 };
     }
     const { archivedIds, freedDiskGb } = await archiveSandboxesLru(
       stoppedRes.evictedIds.map((id) => ({ id, disk: 10, lastActivityAt: null, managed: true })),
       1,
-      `disk-quota-archive:${reason}`,
+      `disk-quota-archive:${partitionKey}:${reason}`,
       deps,
     );
     return { stoppedCount: stoppedRes.evictedIds.length, archivedIds, freedDiskGb };
   })().finally(() => {
-    inFlightDisk = null;
+    inFlightDiskByOrg.delete(partitionKey);
   });
 
-  inFlightDisk = run;
+  inFlightDiskByOrg.set(partitionKey, run);
   return run;
 }
 
@@ -305,8 +316,10 @@ export function ensureDaytonaCapacitySlot(
   deps: DaytonaSlotManagerDeps,
   limits: { maxRunning: number; maxNonArchived: number },
   excludeExternalId?: string,
+  partitionKey = 'default',
 ): Promise<void> {
-  if (inFlightCapacity) return inFlightCapacity;
+  const existing = inFlightCapacityByOrg.get(partitionKey);
+  if (existing) return existing;
 
   const run = (async (): Promise<void> => {
     const [startedAll, stoppedAll] = await Promise.all([
@@ -325,7 +338,7 @@ export function ensureDaytonaCapacitySlot(
       const stopRes = await stopSandboxesLru(
         startedKortix,
         needStop,
-        `lru-concurrency:${reason}`,
+        `lru-concurrency:${partitionKey}:${reason}`,
         deps,
       );
       newlyStoppedIds.push(...stopRes.evictedIds);
@@ -342,14 +355,14 @@ export function ensureDaytonaCapacitySlot(
       await archiveSandboxesLru(
         archivePool,
         needArchive,
-        `lru-disk:${reason}`,
+        `lru-disk:${partitionKey}:${reason}`,
         deps,
       );
     }
   })().finally(() => {
-    inFlightCapacity = null;
+    inFlightCapacityByOrg.delete(partitionKey);
   });
 
-  inFlightCapacity = run;
+  inFlightCapacityByOrg.set(partitionKey, run);
   return run;
 }

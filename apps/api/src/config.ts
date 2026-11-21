@@ -695,6 +695,13 @@ const envSchema = z.object({
   DAYTONA_API_KEY: optStr,
   DAYTONA_SERVER_URL: optStrDefault('https://app.daytona.io/api'),
   DAYTONA_TARGET: optStrDefault('eu'),
+  // Pinned immutable GHCR sandbox image reference pulled into each user's own
+  // Daytona organization during onboarding (e.g. ghcr.io/mmuu6699/kortix-sandbox:20261121-da3f5cdd).
+  // Never :latest — Daytona rejects :latest tags.
+  KORTIX_SANDBOX_GHCR_IMAGE: optStr,
+  // Optional dedicated AES-256-GCM master secret for user_daytona_credentials.
+  // Falls back to API_KEY_SECRET (HKDF domain-separated) when unset.
+  DAYTONA_CREDENTIALS_ENCRYPTION_KEY: optStr,
   // Org-level Daytona webhook signing secret (Svix `whsec_…`). When set, the
   // /v1/billing/webhooks/daytona endpoint closes compute billing the instant a
   // box stops; the reaper sweep is the backstop, so this is optional.
@@ -1679,6 +1686,8 @@ export const config = {
   DAYTONA_API_KEY: env.DAYTONA_API_KEY,
   DAYTONA_SERVER_URL: env.DAYTONA_SERVER_URL,
   DAYTONA_TARGET: env.DAYTONA_TARGET,
+  KORTIX_SANDBOX_GHCR_IMAGE: env.KORTIX_SANDBOX_GHCR_IMAGE,
+  DAYTONA_CREDENTIALS_ENCRYPTION_KEY: env.DAYTONA_CREDENTIALS_ENCRYPTION_KEY,
   DAYTONA_WEBHOOK_SECRET: env.DAYTONA_WEBHOOK_SECRET,
   KORTIX_SNAPSHOT_REAP_PREDECESSOR: env.KORTIX_SNAPSHOT_REAP_PREDECESSOR,
   KORTIX_DRIVES_SESSION_MOUNT: env.KORTIX_DRIVES_SESSION_MOUNT,

@@ -49,6 +49,7 @@ import {
   isDaytonaStateTransitionConflict,
 } from './shared/daytona-state-transition';
 import { isDaytonaTransientProviderError } from './shared/daytona-transient';
+import { isDaytonaReconnectRequiredError } from './onboarding/daytona-service';
 import {
   CONNECTORS_PROVIDER_UNAVAILABLE_CODE,
   isComposioTransientProviderError,
@@ -774,6 +775,23 @@ function handleUnhandledError(err: Error, c: Context): Response {
   if (platinum) return platinum;
   const daytonaRateLimited = handleDaytonaRateLimit(err, c, method, path);
   if (daytonaRateLimited) return daytonaRateLimited;
+  if (isDaytonaReconnectRequiredError(err)) {
+    appLogger.warn(`${method} ${path} -> 428 [DaytonaReconnectRequiredError] ${err.message}`, {
+      method,
+      path,
+      errorType: 'DaytonaReconnectRequiredError',
+    });
+    return c.json(
+      {
+        error: 'daytona_reconnect_required',
+        code: 'DAYTONA_RECONNECT_REQUIRED',
+        message: err.message,
+        reconnectRequired: true,
+        status: 428,
+      },
+      428,
+    );
+  }
   const disconnected = handleRepositoryDisconnected(err, c);
   if (disconnected) return disconnected;
   const gitUnavailable = handleTransientGitMirrorFailure(err, c, method, path);

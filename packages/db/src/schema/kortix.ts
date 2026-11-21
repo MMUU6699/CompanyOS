@@ -10612,3 +10612,60 @@ export const calendarComments = kortixSchema.table('calendar_comments', {
 }, (table) => [
   index('idx_calendar_comments_item').on(table.itemId, table.commentId),
 ]).enableRLS();
+
+// ─── Per-User Daytona Credentials & Connect Flows ───────────────────────────
+// Stores each user's AES-256-GCM encrypted Daytona organization API key
+// (service_role only; never readable directly from client roles) plus
+// short-lived WorkOS Device Authorization onboarding flows.
+
+export const userDaytonaCredentials = kortixSchema.table('user_daytona_credentials', {
+  userId: uuid('user_id').primaryKey(),
+  encryptedApiKey: text('encrypted_api_key').notNull(),
+  encryptionIv: text('encryption_iv').notNull(),
+  encryptionTag: text('encryption_tag').notNull(),
+  daytonaOrgId: text('daytona_org_id').notNull(),
+  daytonaRegion: text('daytona_region').default('eu').notNull(),
+  snapshotName: text('snapshot_name'),
+  snapshotStatus: text('snapshot_status')
+    .$type<'pending' | 'pulling' | 'active' | 'inactive' | 'failed'>()
+    .default('pending')
+    .notNull(),
+  snapshotError: text('snapshot_error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  index('idx_user_daytona_credentials_org_id').on(table.daytonaOrgId),
+  check(
+    'user_daytona_credentials_snapshot_status_check',
+    sql`${table.snapshotStatus} IN ('pending', 'pulling', 'active', 'inactive', 'failed')`,
+  ),
+]).enableRLS();
+
+export const daytonaConnectFlows = kortixSchema.table('daytona_connect_flows', {
+  flowId: uuid('flow_id').primaryKey(),
+  deviceCode: text('device_code').notNull(),
+  userCode: text('user_code').notNull(),
+  verificationUriComplete: text('verification_uri_complete').notNull(),
+  status: text('status')
+    .$type<'pending' | 'approved' | 'claimed' | 'expired'>()
+    .default('pending')
+    .notNull(),
+  encryptedApiKey: text('encrypted_api_key'),
+  encryptionIv: text('encryption_iv'),
+  encryptionTag: text('encryption_tag'),
+  daytonaOrgId: text('daytona_org_id'),
+  daytonaRegion: text('daytona_region'),
+  claimToken: text('claim_token'),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex('uniq_daytona_connect_flows_claim_token')
+    .on(table.claimToken)
+    .where(sql`${table.claimToken} IS NOT NULL`),
+  index('idx_daytona_connect_flows_expires_at').on(table.expiresAt),
+  check(
+    'daytona_connect_flows_status_check',
+    sql`${table.status} IN ('pending', 'approved', 'claimed', 'expired')`,
+  ),
+]).enableRLS();
