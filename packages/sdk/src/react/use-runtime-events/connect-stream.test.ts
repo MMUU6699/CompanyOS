@@ -224,6 +224,26 @@ describe('connectRuntimeStream', () => {
     off();
   });
 
+  test('with a shared session stream, openSessionStream connection state drives connecting/open/lost signals even when zero runtime events arrive', () => {
+    const signals: string[] = [];
+    const off = subscribeRuntimeStream((signal) => signals.push(signal.type));
+    const { deps } = baseDeps();
+
+    const cleanup = connectRuntimeStream(deps);
+    expect(signals).toEqual(['connecting']);
+
+    const sessionStream = state.sessionStreams[0]!;
+    const onConn = sessionStream.opts.onConnectionChange as (connected: boolean) => void;
+    onConn(true);
+    expect(signals).toEqual(['connecting', 'open']);
+
+    onConn(false);
+    expect(signals).toEqual(['connecting', 'open', 'lost']);
+
+    cleanup?.();
+    off();
+  });
+
   test('without a session the sandbox-proxy client is the event source and a gap hydrates', () => {
     const { deps } = baseDeps({ options: { enabled: true } });
     const cleanup = connectRuntimeStream(deps);

@@ -95,6 +95,36 @@ export function markSeededPrompt(sessionId: string, messageId: string): void {
   useSessionStateStore.getState().markOptimisticDispatched(sessionId, messageId);
 }
 
+/**
+ * Record that the control plane re-minted `optimisticId` (the wire id this
+ * device sent) as `echoId` when delivering it to the runtime.
+ */
+export function registerOptimisticEcho(sessionId: string, optimisticId: string, echoId: string): void {
+  if (!optimisticId || !echoId || optimisticId === echoId) return;
+  useSessionStateStore.getState().registerOptimisticEcho(sessionId, optimisticId, echoId);
+}
+
+export function optimisticEchoOf(sessionId: string, optimisticId: string): string | undefined {
+  return useSessionStateStore.getState().optimisticEchoOf(sessionId, optimisticId);
+}
+
+export function optimisticOriginOf(sessionId: string, echoId: string): string | undefined {
+  return useSessionStateStore.getState().optimisticOriginOf(sessionId, echoId);
+}
+
+/**
+ * True when a v2 session log in the store already holds at least one user
+ * message on `runtimeSessionId` (so seeding a duplicate first-prompt bubble is unnecessary).
+ */
+export function sessionLogHasUserMessage(runtimeSessionId: string): boolean {
+  const logs = useSessionStateStore.getState().sessionLogs;
+  for (const log of Object.values(logs)) {
+    const list = log.messages[runtimeSessionId];
+    if (list?.some((m) => m.role === 'user')) return true;
+  }
+  return false;
+}
+
 /** Drop an optimistic message that was never accepted (a refused or failed send). */
 export function removeOptimisticMessage(sessionId: string, messageId: string): void {
   useSessionStateStore.getState().optimisticRemove(sessionId, messageId);

@@ -278,3 +278,86 @@ describe('session log: a v1 fragment never stands in for a reply the log lacks (
     expect(replyText(selectSessionRows(store(), ROOT))).toBe('in that batch.');
   });
 });
+
+describe('session log: v2 optimistic user message retirement (no duplicate user bubble)', () => {
+  const nativePage = () => {
+    const p = page();
+    for (const t of p.threads) delete t.ext;
+    return p;
+  };
+
+  test('a dispatched first-prompt seed (client-minted id stamped after server reply) is retired when the v2 page lands and never duplicates below the assistant reply', () => {
+    const base = nativePage();
+    const serverUser = {
+      ...structuredClone(base.messages.find((m) => m.role === 'user')!),
+      message_id: 'msg_server_first_user',
+      seq: 1,
+      created_at: '2026-11-21T12:00:00.000Z',
+      blocks: [{ type: 'text' as const, id: 'blk_u1', text: 'Say hello in Arabic and English' }],
+    };
+    const serverAssistant = {
+      ...structuredClone(base.messages.find((m) => m.role === 'assistant')!),
+      message_id: 'msg_server_first_reply',
+      seq: 2,
+      created_at: '2026-11-21T12:00:02.000Z',
+      blocks: [{ type: 'text' as const, id: 'blk_a1', text: 'مرحباً! Hello!' }],
+    };
+    // Client seeds optimistic message AFTER /start completes (created_at is newer than the reply!).
+    const seedId = 'msg_client_seed_after_start';
+    const seedCreatedMs = Date.parse('2026-11-21T12:00:05.000Z');
+    store().optimisticAdd(
+      ROOT,
+      { id: seedId, sessionID: ROOT, role: 'user', time: { created: seedCreatedMs } } as Message,
+      [{ id: 'prt_seed', sessionID: ROOT, messageID: seedId, type: 'text', text: 'Say hello in Arabic and English' } as Part],
+    );
+    store().markOptimisticDispatched(ROOT, seedId);
+
+    store().applySessionLogPage(SESSION, {
+      ...base,
+      messages: [serverUser, serverAssistant],
+    });
+
+    expect(store().isOptimisticMessage(ROOT, seedId)).toBe(false);
+    expect(store().optimisticEchoOf(ROOT, seedId)).toBe('msg_server_first_user');
+    expect(store().messages[ROOT] ?? []).toHaveLength(0);
+
+    const logState = store().sessionLogs[SESSION]!;
+    const thread = sessionLogThreadWithV1Rows(
+      logState,
+      selectSessionLogThread(logState, ROOT)!,
+      selectSessionRows(store(), ROOT),
+      (id) => store().optimisticEchoOf(ROOT, id),
+    );
+    expect(thread.messages.map((m) => [m.message_id, m.role])).toEqual([
+      ['msg_server_first_user', 'user'],
+      ['msg_server_first_reply', 'assistant'],
+    ]);
+  });
+
+  test('registerOptimisticEcho retires the v1 optimistic bubble immediately when the v2 log already holds the re-minted echo id', () => {
+    store().applySessionLogPage(SESSION, nativePage());
+    const optId = 'msg_wire_followup';
+    const echoId = 'msg_reminted_followup';
+    store().optimisticAdd(
+      ROOT,
+      { id: optId, sessionID: ROOT, role: 'user', time: { created: Date.now() } } as Message,
+      [{ id: 'prt_opt', sessionID: ROOT, messageID: optId, type: 'text', text: 'follow up' } as Part],
+    );
+    store().markOptimisticInboxBacked(ROOT, optId);
+
+    // The v2 stream delivers the re-minted user message before the queue poll registers the alias.
+    const template = log.threads[0]!.messages.find((m) => m.role === 'user')!;
+    const put = {
+      ...structuredClone(template),
+      message_id: echoId,
+      seq: 999,
+      blocks: [{ type: 'text' as const, id: 'blk_f1', text: 'follow up' }],
+    };
+    store().applySessionLogEvent(SESSION, ev('log.message', { rev: 50, message: put }) as never);
+
+    // Now the inbox row announces the pairing -> must retire `optId` from v1 `messages[ROOT]`.
+    store().registerOptimisticEcho(ROOT, optId, echoId);
+    expect(store().isOptimisticMessage(ROOT, optId)).toBe(false);
+    expect((store().messages[ROOT] ?? []).some((m) => m.id === optId)).toBe(false);
+  });
+});

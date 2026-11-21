@@ -82,6 +82,9 @@ import { GlassButtons, LIQUID_GLASS_AVAILABLE } from '@/components/kortix/liquid
 import {
   addOptimisticMessage,
   markOptimisticAccepted,
+  optimisticEchoOf,
+  optimisticOriginOf,
+  registerOptimisticEcho,
   removeOptimisticMessage,
   removeSessionMessage,
   sessionMessageIds,
@@ -181,7 +184,7 @@ import { useToast } from '@/components/kortix/toast-provider';
 import { pinnedPermission } from '@/lib/session/permission-prompt';
 import { useTabStore } from '@/stores/tab-store';
 import { useMessageQueueStore } from '@/stores/message-queue-store';
-import { queueHeaderLabel, queueRowCaption, queueRowText } from '@/lib/session/queue-undo';
+import { filterVisibleQueuePrompts, queueHeaderLabel, queueRowCaption, queueRowText } from '@/lib/session/queue-undo';
 import { useSessionPromptRequestStore } from '@/stores/session-prompt-request-store';
 import { useSandboxContext } from '@/contexts/SandboxContext';
 import { useAuthContext } from '@/contexts/AuthContext';
@@ -567,11 +570,11 @@ function SessionPageImpl({ sessionId, projectId, projectSessionId, onBack, onOpe
   usePermissionSelfHeal(sessionId, healRows, { enabled: runtimeReady && !streamConnected });
 
   // ── Message Queue ──────────────────────────────────────────────────────
-  const [queuedMessages, setQueuedMessages] = useState<SessionPrompt[]>(EMPTY_PROMPTS);
+  const [rawQueuedMessages, setRawQueuedMessages] = useState<SessionPrompt[]>(EMPTY_PROMPTS);
   // A read with the same rows keeps the previous array, so a poll that finds
   // nothing new renders nothing.
   const setQueueRows = useCallback((prompts: SessionPrompt[]) => {
-    setQueuedMessages((prev) => (JSON.stringify(prev) === JSON.stringify(prompts) ? prev : prompts));
+    setRawQueuedMessages((prev) => (JSON.stringify(prev) === JSON.stringify(prompts) ? prev : prompts));
   }, []);
   const refreshQueue = useCallback(async () => {
     if (!projectId || !projectSessionId) { setQueueRows(EMPTY_PROMPTS); return; }
@@ -613,6 +616,48 @@ function SessionPageImpl({ sessionId, projectId, projectSessionId, onBack, onOpe
   useEffect(() => {
     setQueueRows(sdkQueue.prompts);
   }, [sdkQueue.prompts, setQueueRows]);
+  // Register re-minted prompt pairings (wire_message_id -> message_id) from both
+  // pending inbox rows and delivered `sent` rows (matching web `session-chat.tsx`
+  // and `useSessionLogThread`), so a re-minted echo replaces its optimistic bubble.
+  const activeRuntimeThreadId = storeThread?.thread_id ?? sessionId;
+  useEffect(() => {
+    if (isSubThread) return;
+    for (const p of [...sdkQueue.prompts, ...sdkQueue.sent]) {
+      const wire = p.wire_message_id;
+      if (!wire || !p.message_id || wire === p.message_id) continue;
+      registerOptimisticEcho(activeRuntimeThreadId, wire, p.message_id);
+      if (activeRuntimeThreadId !== sessionId) {
+        registerOptimisticEcho(sessionId, wire, p.message_id);
+      }
+    }
+  }, [isSubThread, sdkQueue.prompts, sdkQueue.sent, activeRuntimeThreadId, sessionId]);
+  // Filter inbox rows to only those not already rendered in the transcript (nor
+  // the session's initial prompt), matching web `projectQueueRows`.
+  const transcriptClaimedMessageIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const m of thread?.messages ?? []) {
+      if (m.role !== 'user') continue;
+      ids.add(m.message_id);
+      const echo = optimisticEchoOf(activeRuntimeThreadId, m.message_id) ?? optimisticEchoOf(sessionId, m.message_id);
+      if (echo) ids.add(echo);
+      const origin = optimisticOriginOf(activeRuntimeThreadId, m.message_id) ?? optimisticOriginOf(sessionId, m.message_id);
+      if (origin) ids.add(origin);
+    }
+    for (const p of [...rawQueuedMessages, ...sdkQueue.sent]) {
+      const mid = p.message_id;
+      const wid = p.wire_message_id ?? undefined;
+      if ((mid && ids.has(mid)) || (wid && ids.has(wid))) {
+        if (mid) ids.add(mid);
+        if (wid) ids.add(wid);
+        if ('client_message_id' in p && p.client_message_id) ids.add(p.client_message_id);
+      }
+    }
+    return ids;
+  }, [thread?.messages, activeRuntimeThreadId, sessionId, rawQueuedMessages, sdkQueue.sent]);
+  const queuedMessages = useMemo(
+    () => filterVisibleQueuePrompts(rawQueuedMessages, transcriptClaimedMessageIds),
+    [rawQueuedMessages, transcriptClaimedMessageIds],
+  );
   // One read when the page opens, so the queue paints with the page.
   useEffect(() => {
     void refreshQueue();
@@ -826,6 +871,13 @@ function SessionPageImpl({ sessionId, projectId, projectSessionId, onBack, onOpe
         if (result.state === 'failed') throw new Error('Prompt delivery was refused');
         // The inbox holds it: the bubble stays until the delivered echo.
         markOptimisticAccepted(sessionId, messageId);
+        if (result.message_id && result.message_id !== messageId) {
+          sentHereIds.current.add(result.message_id);
+          registerOptimisticEcho(activeRuntimeThreadId, messageId, result.message_id);
+          if (activeRuntimeThreadId !== sessionId) {
+            registerOptimisticEcho(sessionId, messageId, result.message_id);
+          }
+        }
         useSessionWorkingStore.getState().acceptSendReceipt(projectSessionId, messageId, Date.now());
         log.log('[SessionPage] Prompt accepted');
         // The first send asks for notification permission, once per install.

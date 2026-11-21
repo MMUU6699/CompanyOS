@@ -55,3 +55,43 @@ export function queueRowCaption(prompt: {
   if (prompt.steer_fallback) return STEER_FALLBACK_CAPTION[prompt.steer_fallback];
   return prompt.delivery === 'steer' ? 'Read at next step' : null;
 }
+
+export interface QueueFilterPromptLike {
+  client_message_id?: string | null;
+  message_id?: string | null;
+  wire_message_id?: string | null;
+  placement?: 'composer' | 'transcript' | string | null;
+}
+
+/**
+ * Is this row the session's first prompt (`start_…` or `pending:<session>`)?
+ * The transcript draws the first prompt; it never belongs in the "Up next" queue panel.
+ */
+export function isFirstPromptQueueRow(prompt: Pick<QueueFilterPromptLike, 'client_message_id'>): boolean {
+  const id = prompt.client_message_id ?? '';
+  return id.startsWith('start_') || id.startsWith('pending:');
+}
+
+/**
+ * Filter raw inbox rows to the ones that belong in the composer's "Up next"
+ * `QueuePanel` (matching web `projectQueueRows` in `queue-projection.ts`):
+ * excludes the session's first prompt, transcript-placed prompts, and any
+ * prompt whose `message_id`, `wire_message_id`, or `client_message_id` is
+ * already rendered in the transcript.
+ */
+export function filterVisibleQueuePrompts<T extends QueueFilterPromptLike>(
+  prompts: readonly T[],
+  transcriptMessageIds?: ReadonlySet<string>,
+): T[] {
+  if (prompts.length === 0) return prompts as T[];
+  const filtered = prompts.filter((prompt) => {
+    if (isFirstPromptQueueRow(prompt) || prompt.placement === 'transcript') return false;
+    if (transcriptMessageIds) {
+      if (prompt.message_id && transcriptMessageIds.has(prompt.message_id)) return false;
+      if (prompt.wire_message_id && transcriptMessageIds.has(prompt.wire_message_id)) return false;
+      if (prompt.client_message_id && transcriptMessageIds.has(prompt.client_message_id)) return false;
+    }
+    return true;
+  });
+  return filtered.length === prompts.length ? (prompts as T[]) : filtered;
+}

@@ -134,3 +134,36 @@
   - Live Streaming Chat via Railway gateway: `HTTP 200`, TTFT **`865 ms`**, Total **`1,034 ms`** (`nvidia/nemotron-3.5-super-vl-120b-a12b`, `$0.00000`).
   - Live Tool Calling (`web_search`) via Railway gateway: `HTTP 200`, Total **`875 ms`** (`nvidia/nemotron-3.5-super-vl-120b-a12b`, valid JSON `tool_calls`, `$0.00000`).
   - Live Vision (`image_url` 32x32 solid red PNG) via Railway gateway: `HTTP 200`, Total **`1,769 ms`** (`nvidia/nemotron-3.5-super-vl-120b-a12b`, reply `"Red"`, `$0.00000`).
+
+---
+
+## Phase 9 — Image Upload RLS Fix (`prompt-attachments`), Duplicate User Message & False `Live updates paused` Fix, and Code-Grounded `Mykortix` Tool & Browser Audit
+- **Status**: `COMPLETED & VERIFIED`
+- **1. `prompt-attachments` Image Upload RLS Fix & Live Re-Test D Verification**:
+  - **Root Cause**: `apps/api/src/projects/prompt-attachment-storage.ts` writes attachments to the `staged-files` Supabase Storage bucket using `config.SUPABASE_SERVICE_ROLE_KEY`. On Railway, `SUPABASE_SERVICE_ROLE_KEY` had been configured with the `anon` JWT (`role: "anon"`), causing Supabase Storage RLS to reject writes with `403 new row violates row-level security policy` (`503 Attachment storage is unavailable`).
+  - **Fix**: Updated `SUPABASE_SERVICE_ROLE_KEY` on Railway (`kortix-api`) with the project's `service_role` JWT (deploy `2219bcf9-1e74-4733-9911-dc83924611e0`, `SUCCESS`).
+  - **Live Re-Test D Proof on USB Phone (`SM_A515F`)**:
+    - `POST /v1/workspaces/:id/attachments` -> `201` (`535 ms`)
+    - `POST /v1/workspaces/:id/attachments/:id/complete` -> `200` (`334 ms`)
+    - `GET /v1/workspaces/:id/runtime/prompt-attachments/:id` -> `200` (`149 ms`)
+    - `POST /v1/llm/chat/completions` (`nvidia/nemotron-3.5-super-vl-120b-a12b`, `$0.00000`) -> `200` (`2,585 ms`), rendering `"The image is solid red."` on the phone screen (`E:\luna\tmp_qa\retest_d2_poll_3.png`).
+- **2. Duplicate User Message / Optimistic Queue Bug & False `Live updates paused · Reconnect` Fix (`packages/sdk` + `apps/mobile`)**:
+  - **Root Cause #1 (v2 Session Log never retired v1 Optimistic User Messages)**:
+    - All `pi` sessions negotiate `schema=v2` (`kortix.session/2`). On Project Home first-prompt sends, `apps/mobile/lib/session/project-connect.ts` (`seedFirstPrompt`) inserts a client-minted optimistic message (`time.created = Date.now()`) into `useSyncStore.messages[rootId]` via `addOptimisticMessage` + `markSeededPrompt` (`markOptimisticDispatched`) after `/start` returns.
+    - Because v2 messages arrive only via `applySessionLogPage()` and `applySessionLogFrame()` (`packages/sdk/src/browser/stores/sync-store.ts`), which previously never retired v1 optimistic rows in `state.messages[threadId]`, `sessionLogThreadWithV1Rows()` (`packages/sdk/src/core/session-log/v1-view.ts`) merged the unretired client seed into `thread.messages` by `created_at` — placing a duplicate user bubble **below** the assistant reply until a manual pull-to-refresh triggered v1 `hydrate()`.
+  - **Root Cause #2 (Re-minted follow-up echo pairing & unfiltered `QueuePanel` on Mobile)**:
+    - `packages/sdk/src/browser/stores/sync-store.ts` (`registerOptimisticEcho`) only checked `state.messages[sessionID]` (v1) before retiring a re-minted optimistic bubble, ignoring v2 `state.sessionLogs`.
+    - `apps/mobile/components/session/SessionPage.tsx` never registered `wire_message_id -> message_id` echo aliases from `sdkQueue.prompts` / `sdkQueue.sent` and passed unfiltered `sdkQueue.prompts` directly to `QueuePanel` (`Up next · 1`), flashing first prompts and already-rendered transcript messages in the queue header.
+  - **Root Cause #3 (False `Live updates paused · Reconnect` banner on idle / fast-completing sessions)**:
+    - In `packages/sdk/src/react/use-runtime-events/connect-stream.ts`, when using the shared R5.3 session stream (`sessionStreamEventClient`), `openEventStream` only transitioned from `'connecting'` to `'open'` upon receiving a yielded runtime event. On an idle session or when a fast turn completed before SSE attached, only control frames and heartbeats arrived, leaving `useStreamHealthStore` stuck in `'connecting'` until `STREAM_STALLED_MS` (`120 s`) triggered a false `Live updates paused · Reconnect` banner.
+  - **Fixes Applied**:
+    - Added `retireOptimisticUsersForSessionLog()` and `sessionLogHoldsMessage()` in `packages/sdk/src/browser/stores/sync-store.ts`, retiring confirmed/aliased/dispatched-seed optimistic user messages atomically in `applySessionLogPage()`, `applySessionLogFrame()`, and `registerOptimisticEcho()`.
+    - Wired `openSessionStream.onConnectionChange` and `onEnded` in `packages/sdk/src/react/use-runtime-events/connect-stream.ts` to emit `connecting` / `open` / `lost` / `parked` signals on `subscribeRuntimeStream`.
+    - Added `registerOptimisticEcho`, `optimisticEchoOf`, `optimisticOriginOf`, and `sessionLogHasUserMessage` in `apps/mobile/lib/session/session-store.ts`, `filterVisibleQueuePrompts` in `apps/mobile/lib/session/queue-undo.ts`, guard in `apps/mobile/lib/session/project-connect.ts`, and echo registration + queue filtering in `apps/mobile/components/session/SessionPage.tsx`.
+  - **Updated Android Release APK**:
+    - Path: `apps/mobile/android/app/build/outputs/apk/release/app-release.apk`
+    - Size: `89,575,626` bytes (`85.43 MB`), `arm64-v8a`
+    - SHA-256: `8DAE8C346C0F7B8C3FA5E4CD517A471C4F56DBADD213140250879351E439B2A8`
+    - Direct Download URL: `https://github.com/MMUU6699/kortix-starter-workspace/releases/download/android-latest/kortix-latest.apk` (`HTTP 200`, `Content-Length: 89575626`).
+- **3. Code-Grounded Audit of `Mykortix` Real Tools & Interactive Browser**:
+  - Audited all 27 registered tools across `apps/kortix-sandbox-agent-server/src/harness/pi/tools.ts`, `runtime.ts`, `codemode.ts`, `extensions/*.ts`, and `services/tools/{host,kortix,platform}` plus Daytona image layers (`packages/shared/src/sandbox/dockerfile-layer.ts`, `desktop.ts`, `my-kortix-dockerfile.ts`, `apps/sandbox/entrypoint.sh`) and Web/Mobile UI (`packages/ui/src/session/panel/session-desktop.tsx`, `apps/mobile/components/pages/BrowserPage.tsx`, `apps/mobile/components/session/SandboxPreviewSheet.tsx`).

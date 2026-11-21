@@ -16,6 +16,7 @@ import {
 	isWithinRewindWindow,
 	stageSessionRewind,
 } from "../../core/session/rewind";
+import { KORTIX_TRANSCRIPT_SCHEMA } from "../../core/runtime/transcript-types";
 import type { SessionLogPage } from "../../core/session-log/source";
 import {
 	EMPTY_SESSION_LOG_STATE,
@@ -23,7 +24,9 @@ import {
 	applySessionLogPage,
 	type SessionLogEventInput,
 	type SessionLogState,
+	type SessionLogThreadHead,
 } from "../../core/session-log/store";
+import type { SessionLogMessage } from "../../core/session-log/types";
 import { isRetryableTurnError } from "../../core/turns/open-turn";
 import { ascendingId } from "./sync-store/ascending-id";
 import { Binary } from "./sync-store/binary";
@@ -1249,6 +1252,191 @@ function takeDeltaEventId(sessionID: string, tailKey: string, id: string): boole
 	return true;
 }
 
+/** The v1 runtime session key for a session-log thread head. */
+function sessionLogThreadRuntimeKey(head: SessionLogThreadHead | undefined, threadId: string): string {
+	if (!head?.ext) return threadId;
+	for (const entry of Object.values(head.ext)) {
+		if (entry?.version === KORTIX_TRANSCRIPT_SCHEMA && typeof entry.native_id === "string" && entry.native_id) {
+			return entry.native_id;
+		}
+	}
+	return threadId;
+}
+
+/** True when any v2 session log holds (or tombstoned) `messageId` on a thread belonging to `runtimeSessionId`. */
+function sessionLogHoldsMessage(
+	logs: Record<string, SessionLogState>,
+	runtimeSessionId: string,
+	messageId: string,
+): boolean {
+	for (const log of Object.values(logs)) {
+		const hasThread =
+			runtimeSessionId in log.messages ||
+			runtimeSessionId in log.threads ||
+			Object.values(log.threads).some(
+				(head) => sessionLogThreadRuntimeKey(head, head.thread_id) === runtimeSessionId,
+			);
+		if (!hasThread) continue;
+		if (log.revs[messageId] !== undefined) return true;
+		for (const list of Object.values(log.messages)) {
+			if (list.some((m) => m.message_id === messageId)) return true;
+		}
+	}
+	return false;
+}
+
+function normalizedV1UserText(parts: readonly Part[] | undefined): string {
+	if (!parts?.length) return "";
+	return parts
+		.filter((p): p is TextPart => p.type === "text" && !(p as { synthetic?: boolean }).synthetic)
+		.map((p) => p.text)
+		.join("\n")
+		.trim();
+}
+
+function normalizedV2UserText(message: SessionLogMessage): string {
+	return message.blocks
+		.filter((b): b is { id: string; type: "text"; text: string } => b.type === "text" && typeof b.text === "string")
+		.map((b) => b.text)
+		.join("\n")
+		.trim();
+}
+
+/**
+ * Retire v1 optimistic user messages that a v2 session-log page or `log.message`
+ * frame has now confirmed. Mirrors v1 `hydrate` / `message.updated` reconciliation:
+ *  1. Exact `message_id` match (or tombstoned in `revs`);
+ *  2. Registered `optimisticEchoes` alias match (server re-minted prompt id);
+ *  3. Dispatched non-inbox-backed seed (e.g. mobile `seedFirstPrompt` for
+ *     `POST /sessions` `initial_prompt`, where the server mints an id the client
+ *     never saw), matched only against NEW user messages arriving on a non-older
+ *     page or live frame — preferring normalized text match, then ordinal fallback.
+ *
+ * Returns `null` when nothing changed (O(1) fast path when no optimistic messages exist).
+ */
+function retireOptimisticUsersForSessionLog(
+	state: Pick<SyncState, "messages" | "parts">,
+	prevLog: SessionLogState,
+	nextLog: SessionLogState,
+	touchedThreadIds: Iterable<string>,
+	beforeSeq?: number,
+): { messages: Record<string, Message[]>; parts: Record<string, Part[]> } | null {
+	let nextMessages: Record<string, Message[]> | null = null;
+	let nextParts: Record<string, Part[]> | null = null;
+
+	for (const threadId of touchedThreadIds) {
+		const runtimeKey = sessionLogThreadRuntimeKey(nextLog.threads[threadId], threadId);
+		const storeKeys = runtimeKey === threadId ? [threadId] : [runtimeKey, threadId];
+		const nextLogMsgs = nextLog.messages[threadId] ?? [];
+		const prevLogMsgs = prevLog.messages[threadId] ?? [];
+
+		for (const storeKey of storeKeys) {
+			const currentMessages = (nextMessages ?? state.messages)[storeKey];
+			if (!currentMessages?.length) continue;
+			const optimisticUsers = currentMessages.filter(
+				(m) => m.role === "user" && isOptimistic(storeKey, m.id),
+			);
+			if (optimisticUsers.length === 0) continue;
+
+			const nextLogIds = new Set(nextLogMsgs.map((m) => m.message_id));
+			const prevLogIds = new Set(prevLogMsgs.map((m) => m.message_id));
+			const inLog = (id: string) => nextLogIds.has(id) || nextLog.revs[id] !== undefined;
+			const marks = sessionScratch.get(storeKey);
+
+			const superseded = new Map<string, string>();
+			const claimedEchoIds = new Set<string>();
+
+			// Pass 1: exact ID confirmation (or tombstone).
+			for (const m of optimisticUsers) {
+				if (inLog(m.id)) {
+					superseded.set(m.id, m.id);
+					claimedEchoIds.add(m.id);
+				}
+			}
+
+			// Pass 2: pre-registered alias (`registerOptimisticEcho`).
+			for (const m of optimisticUsers) {
+				if (superseded.has(m.id)) continue;
+				const alias = marks?.optimisticEchoes.get(m.id);
+				if (alias && inLog(alias) && !claimedEchoIds.has(alias)) {
+					superseded.set(m.id, alias);
+					claimedEchoIds.add(alias);
+				}
+			}
+
+			// Pass 3: dispatched non-inbox-backed seeds (e.g. initial prompt seed).
+			// Never let an older history page (`beforeSeq !== undefined`) retire a
+			// newly sent prompt.
+			if (beforeSeq === undefined) {
+				const eligible = optimisticUsers.filter(
+					(m) =>
+						!superseded.has(m.id) &&
+						isDispatched(storeKey, m.id) &&
+						!marks?.inboxBackedOptimisticIds.has(m.id) &&
+						!marks?.optimisticEchoes.get(m.id),
+				);
+				if (eligible.length > 0) {
+					const newLogUsers = nextLogMsgs.filter(
+						(m) =>
+							m.role === "user" &&
+							!prevLogIds.has(m.message_id) &&
+							!claimedEchoIds.has(m.message_id),
+					);
+					const partsSource = nextParts ?? state.parts;
+
+					// 3a: normalized visible text match first.
+					for (const m of eligible) {
+						const optText = normalizedV1UserText(partsSource[m.id]);
+						if (!optText) continue;
+						const match = newLogUsers.find(
+							(u) => !claimedEchoIds.has(u.message_id) && normalizedV2UserText(u) === optText,
+						);
+						if (match) {
+							superseded.set(m.id, match.message_id);
+							claimedEchoIds.add(match.message_id);
+						}
+					}
+
+					// 3b: ordinal fallback for remaining dispatched seeds (e.g. image-only
+					// first prompt or server-expanded text), mirroring v1 `hydrate` / `message.updated`.
+					const remainingEligible = eligible.filter((m) => !superseded.has(m.id));
+					const remainingNewUsers = newLogUsers.filter((u) => !claimedEchoIds.has(u.message_id));
+					if (remainingEligible.length === 1 && remainingNewUsers.length >= 1) {
+						const m = remainingEligible[0]!;
+						const u = remainingNewUsers[0]!;
+						superseded.set(m.id, u.message_id);
+						claimedEchoIds.add(u.message_id);
+					} else if (prevLogMsgs.length === 0 && remainingEligible.length > 1) {
+						let idx = 0;
+						for (const m of remainingEligible) {
+							const u = remainingNewUsers[idx];
+							if (!u) break;
+							idx += 1;
+							superseded.set(m.id, u.message_id);
+							claimedEchoIds.add(u.message_id);
+						}
+					}
+				}
+			}
+
+			if (superseded.size === 0) continue;
+
+			nextMessages ??= { ...state.messages };
+			nextParts ??= { ...state.parts };
+			let updatedList = currentMessages.filter((m) => !superseded.has(m.id));
+			for (const [optId, echoId] of superseded) {
+				releaseConfirmedOptimisticId(storeKey, optId, echoId);
+				recordOptimisticEcho(storeKey, optId, echoId);
+				updatedList = rekeyStubParent(storeKey, updatedList, optId, echoId);
+				delete nextParts[optId];
+			}
+			nextMessages[storeKey] = updatedList;
+		}
+	}
+
+	return nextMessages && nextParts ? { messages: nextMessages, parts: nextParts } : null;
+}
+
 /**
  * One `log.*` frame into `sessionId`'s log. `log.block.delta` shares the v1
  * delta path's duplicate-delivery check (keyed by thread, the runtime session
@@ -1263,6 +1451,7 @@ function applySessionLogFrame(sessionId: string, event: SessionLogEventInput): v
 	const wire = event.type === "log.block.delta" ? ((event as { coalesced?: SessionLogEventInput[] }).coalesced ?? [event]) : [event];
 	let next = current;
 	let delta: { thread_id: string } | undefined;
+	const touchedThreads = new Set<string>();
 	for (const frame of wire) {
 		const applied = applySessionLogEvent(next, frame);
 		if (applied === next) continue;
@@ -1270,12 +1459,29 @@ function applySessionLogFrame(sessionId: string, event: SessionLogEventInput): v
 			const p = frame.properties as { thread_id: string; message_id: string; block_id: string };
 			if (frame.id && !takeDeltaEventId(p.thread_id, `${p.message_id}:${p.block_id}:log`, frame.id)) continue;
 			delta = p;
+		} else if (frame.type === "log.message") {
+			const p = frame.properties as { message?: { thread_id?: string } } | null;
+			if (p?.message?.thread_id) {
+				touchedThreads.add(p.message.thread_id);
+			} else {
+				for (const tid of Object.keys(applied.messages)) touchedThreads.add(tid);
+				for (const tid of Object.keys(applied.threads)) touchedThreads.add(tid);
+			}
 		}
 		next = applied;
 	}
 	if (next === current) return;
 	if (delta) state.noteSessionActivity(delta.thread_id);
-	useSyncStore.setState((s) => ({ sessionLogs: { ...s.sessionLogs, [sessionId]: next } }));
+	useSyncStore.setState((s) => {
+		const retired =
+			touchedThreads.size > 0
+				? retireOptimisticUsersForSessionLog(s, current, next, touchedThreads)
+				: null;
+		return {
+			sessionLogs: { ...s.sessionLogs, [sessionId]: next },
+			...(retired ?? {}),
+		};
+	});
 }
 
 /**
@@ -1761,7 +1967,9 @@ export const useSyncStore = create<SyncState>()((set, get) => ({
 		// already confirmed. So the pairing is honoured whichever side arrives
 		// second — the alias retires the bubble here exactly as the echo would
 		// have retired it there.
-		if (!get().messages[sessionID]?.some((m) => m.id === echoID)) return;
+		const inV1 = get().messages[sessionID]?.some((m) => m.id === echoID) ?? false;
+		const inV2 = !inV1 && sessionLogHoldsMessage(get().sessionLogs, sessionID, echoID);
+		if (!inV1 && !inV2) return;
 		releaseConfirmedOptimisticId(sessionID, live, echoID);
 		set((s) => {
 			const list = s.messages[sessionID] ?? [];
@@ -1777,8 +1985,9 @@ export const useSyncStore = create<SyncState>()((set, get) => ({
 			const bridge = newParts[live];
 			delete newParts[live];
 			// Bridge the typed text until the server's own part frame lands, so
-			// the bubble never blinks empty across the swap.
-			if (bridge?.length && !newParts[echoID]?.length) {
+			// the bubble never blinks empty across the swap (v1 store only; on v2
+			// the session log holds the confirmed blocks).
+			if (inV1 && bridge?.length && !newParts[echoID]?.length) {
 				newParts[echoID] = bridge;
 				scratchOf(sessionID).bridgedPartIds.add(echoID);
 			}
@@ -2428,7 +2637,13 @@ export const useSyncStore = create<SyncState>()((set, get) => ({
 			const current = s.sessionLogs[sessionId] ?? EMPTY_SESSION_LOG_STATE;
 			// A page's session record is a patch; the id it was read for is its `session_id`.
 			const next = applySessionLogPage(current, { ...page, session: { session_id: sessionId, ...page.session } }, beforeSeq);
-			return next === current ? s : { sessionLogs: { ...s.sessionLogs, [sessionId]: next } };
+			const touched = page.thread_id !== null ? [page.thread_id] : Object.keys(next.messages);
+			const retired = retireOptimisticUsersForSessionLog(s, current, next, touched, beforeSeq);
+			if (next === current && !retired) return s;
+			return {
+				...(next === current ? {} : { sessionLogs: { ...s.sessionLogs, [sessionId]: next } }),
+				...(retired ?? {}),
+			};
 		}),
 
 	applySessionLogEvent: (sessionId, event) => applySessionLogFrame(sessionId, event),

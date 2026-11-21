@@ -237,12 +237,25 @@ export function connectRuntimeStream(deps: ConnectRuntimeStreamDeps): (() => voi
       ? sessionStreamEventClient(options.projectId, options.sessionId)
       : null;
   // The box could not replay a gap: re-read what this view holds.
+  // On the shared R5.3 session stream, `openSessionStream` owns the real SSE
+  // connection (control frames + heartbeats + reconnects). `openEventStream`
+  // only advances to `'open'` when a runtime event yields, so on an idle or
+  // fast-completing session it would otherwise stay in `'connecting'` until
+  // the mobile stall timer falsely shows "Live updates paused · Reconnect".
+  if (sessionStream) emitRuntimeStreamSignal({ type: 'connecting' });
   const resyncs =
     options.projectId && options.sessionId
       ? openSessionStream({
           projectId: options.projectId,
           sessionId: options.sessionId,
           onRuntimeResync: () => hydrate(),
+          onConnectionChange: (connected) =>
+            emitRuntimeStreamSignal({ type: connected ? 'open' : 'lost' }),
+          onEnded: (end) => {
+            if (end.reason === 'unauthorized' || end.reason === 'forbidden' || end.reason === 'revoked') {
+              emitRuntimeStreamSignal({ type: 'parked' });
+            }
+          },
         })
       : null;
   const handle = openEventStream({
@@ -269,7 +282,9 @@ export function connectRuntimeStream(deps: ConnectRuntimeStreamDeps): (() => voi
       handleEvent(event);
       emitRuntimeStreamSignal({ type: 'event', event });
     },
-    onConnectionChange: (state) => emitRuntimeStreamSignal({ type: state }),
+    onConnectionChange: (state) => {
+      if (!sessionStream) emitRuntimeStreamSignal({ type: state });
+    },
     onGapRehydrate: () => {
       if (!sessionStream) hydrate();
     },

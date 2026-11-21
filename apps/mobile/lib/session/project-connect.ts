@@ -27,6 +27,7 @@ import { firstPromptSeed, SEED_BUSY_WATCHDOG_MS, seedUndelivered } from '@/lib/s
 import {
   addOptimisticMessage,
   markSeededPrompt,
+  sessionLogHasUserMessage,
   sessionMessageIds,
   sessionStatus,
   setLocalSessionStatus,
@@ -139,6 +140,9 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
   const seedFirstPrompt = useCallback(
     (root: string, first: { text: string; files: AttachedFile[] } | undefined) => {
       if (!first) return;
+      // If the v2 session log already loaded the server's first user message,
+      // skip seeding a client-minted duplicate.
+      if (sessionLogHasUserMessage(root)) return;
       const seed = firstPromptSeed({
         ...first,
         runtimeSessionId: root,

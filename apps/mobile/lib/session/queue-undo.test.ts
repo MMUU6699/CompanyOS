@@ -2,7 +2,14 @@ import { describe, expect, test } from 'bun:test';
 
 import { serializePromptWithPastes } from '@kortix/shared';
 
-import { queueHeaderLabel, queueRowCaption, queueRowText, restoreQueued } from './queue-undo';
+import {
+  filterVisibleQueuePrompts,
+  isFirstPromptQueueRow,
+  queueHeaderLabel,
+  queueRowCaption,
+  queueRowText,
+  restoreQueued,
+} from './queue-undo';
 
 const m = (id: string, sessionId = 's1') => ({ id, sessionId, text: id, timestamp: 0 });
 
@@ -79,5 +86,22 @@ describe('queueRowText', () => {
   });
   test('plain text is unchanged', () => {
     expect(queueRowText('hello')).toBe('hello');
+  });
+});
+
+describe('filterVisibleQueuePrompts', () => {
+  test('excludes first-prompt rows (start_ and pending:), transcript-placed rows, and rows already on screen in the transcript', () => {
+    const rows = [
+      { client_message_id: 'pending:sess_1', message_id: 'msg_1', text: 'first' },
+      { client_message_id: 'start_123', message_id: 'msg_2', text: 'start' },
+      { client_message_id: 'c_trans', message_id: 'msg_3', placement: 'transcript' as const, text: 'in transcript' },
+      { client_message_id: 'c_shown', message_id: 'msg_reminted', wire_message_id: 'msg_wire_shown', text: 'already on screen' },
+      { client_message_id: 'c_queued', message_id: 'msg_queued', wire_message_id: 'msg_wire_queued', text: 'up next' },
+    ];
+    const onScreenIds = new Set(['msg_wire_shown']);
+    expect(isFirstPromptQueueRow(rows[0]!)).toBe(true);
+    expect(isFirstPromptQueueRow(rows[1]!)).toBe(true);
+    expect(isFirstPromptQueueRow(rows[4]!)).toBe(false);
+    expect(filterVisibleQueuePrompts(rows, onScreenIds)).toEqual([rows[4]!]);
   });
 });
