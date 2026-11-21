@@ -1,0 +1,125 @@
+name: Publish Kortix Sandbox Image (GHCR)
+
+# Stages the exact buildMyKortixSandboxDockerfile context (kortix-agent, kortix
+# CLI, kortix-entrypoint, managed-skills, scaffold.git, MACHINE.md, desktop)
+# and pushes an immutable pinned image tag to GHCR for fast per-user Daytona
+# snapshot pulls. Never pushes :latest (Daytona rejects :latest tags).
+on:
+  workflow_dispatch:
+    inputs:
+      tag_suffix:
+        description: 'Optional extra suffix appended to YYYYMMDD-<shortsha>'
+        required: false
+        default: ''
+
+concurrency:
+  group: publish-kortix-sandbox-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & Push linux/amd64 Sandbox Image
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free runner disk space for large container build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/share/swift || true
+          df -h
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Setup Bun 1.4.4
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.4'
+
+      - name: Install workspace dependencies for API and CLI staging
+        run: |
+          pnpm install --filter ./apps/api... --filter ./apps/cli... --frozen-lockfile --ignore-scripts
+
+      - name: Compile kortix-agent (linux-x64)
+        working-directory: apps/kortix-sandbox-agent-server
+        run: |
+          bun install --frozen-lockfile
+          BUN_COMPILE_TARGET=bun-linux-x64 bash scripts/build.sh
+
+      - name: Compile kortix CLI with attestation (linux-x64)
+        run: |
+          KORTIX_VER="$(tr -d '\r\n' < VERSION 2>/dev/null || echo 'dev')"
+          SHORT_SHA="$(git rev-parse --short=8 HEAD)"
+          BUN_COMPILE_TARGET=bun-linux-x64 \
+            KORTIX_CLI_VERSION="${KORTIX_VER}+${SHORT_SHA}" \
+            bash apps/cli/scripts/build.sh
+
+      - name: Stage buildMyKortixSandboxDockerfile context
+        run: |
+          bun apps/api/scripts/stage-mykortix-context.ts /tmp/kortix-sandbox-context
+          ls -la /tmp/kortix-sandbox-context
+          head -n 30 /tmp/kortix-sandbox-context/Dockerfile
+
+      - name: Compute immutable GHCR tag
+        id: meta
+        run: |
+          OWNER="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          DATE_UTC="$(date -u +%Y%m%d)"
+          SHORT_SHA="$(git rev-parse --short=8 HEAD)"
+          SUFFIX="${{ inputs.tag_suffix }}"
+          if [ -n "$SUFFIX" ]; then
+            TAG="${DATE_UTC}-${SHORT_SHA}-${SUFFIX}"
+          else
+            TAG="${DATE_UTC}-${SHORT_SHA}"
+          fi
+          IMAGE="ghcr.io/${OWNER}/kortix-sandbox:${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Computed immutable image reference: ${IMAGE}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push immutable sandbox image
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: /tmp/kortix-sandbox-context
+          file: /tmp/kortix-sandbox-context/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Print published image summary
+        run: |
+          {
+            echo "## Published Kortix Sandbox Image"
+            echo ""
+            echo "- **Image**: \`${{ steps.meta.outputs.image }}\`"
+            echo "- **Digest**: \`${{ steps.push.outputs.digest }}\`"
+            echo "- **Entrypoint**: \`[\"/usr/local/bin/kortix-entrypoint\"]\`"
+            echo "- **Note**: Ensure package visibility is **Public** in GitHub Packages so per-user Daytona orgs can pull without registry credentials."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "PUBLISHED_IMAGE=${{ steps.meta.outputs.image }}"
+          echo "PUBLISHED_DIGEST=${{ steps.push.outputs.digest }}"
