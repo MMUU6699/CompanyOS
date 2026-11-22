@@ -50,7 +50,11 @@ export function connectStepFromStart(start: StartAnswer): ConnectStep {
       start.failure?.message ?? 'The sandbox could not be provisioned.',
     );
   }
-  if (start.sandbox?.status === 'active' && start.sandbox.external_id) {
+  // Require `stage === 'ready'` before opening the thread: while `stage` is still
+  // `'starting'` / `'booting'` / `'provisioning'`, keep polling `/start` (with server-side
+  // `waitMs`) rather than stalling inside a 15 s blocking `getSessionHealth` probe on a
+  // waking sandbox whose DB row still carries a stale `status: 'active'`.
+  if (start.stage === 'ready' && start.sandbox?.status === 'active' && start.sandbox.external_id) {
     return { kind: 'open' };
   }
   if (start.stage === 'stopped' || start.retriable === false) {

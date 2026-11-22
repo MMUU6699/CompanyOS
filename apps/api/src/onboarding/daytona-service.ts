@@ -228,6 +228,12 @@ export interface UserDaytonaContext {
 }
 
 const DAYTONA_HTTP_TIMEOUT_MS = configuredTimeoutMs('KORTIX_DAYTONA_CALL_TIMEOUT_MS', 20_000, 1_000);
+const DAYTONA_SNAPSHOT_CREATE_TIMEOUT_MS = configuredTimeoutMs(
+  'KORTIX_DAYTONA_SNAPSHOT_CREATE_TIMEOUT_MS',
+  65_000,
+  15_000,
+);
+const DAYTONA_SNAPSHOT_PULL_GRACE_MS = 8 * 60_000;
 const USER_CLIENT_CACHE_TTL_MS = 5 * 60_000;
 const USER_CLIENT_CACHE_MAX = 500;
 const EXTERNAL_OWNER_CACHE_TTL_MS = 10 * 60_000;
@@ -412,7 +418,15 @@ function mapDaytonaSnapshotState(raw: string | undefined): UserDaytonaSnapshotSt
   if (s === 'active') return 'active';
   if (s === 'inactive') return 'inactive';
   if (s === 'pending') return 'pending';
-  if (s === 'pulling' || s === 'building' || s === 'snapshotting') return 'pulling';
+  if (
+    s === 'pulling' ||
+    s === 'building' ||
+    s === 'creating' ||
+    s === 'snapshotting' ||
+    s === 'activating'
+  ) {
+    return 'pulling';
+  }
   if (s === 'error' || s === 'build_failed' || s === 'removing') return 'failed';
   return 'pulling';
 }
@@ -645,14 +659,43 @@ export function ensureUserSnapshot(opts: {
             'Content-Type': 'application/json',
           },
           body: createPayload,
-          signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
+          signal: AbortSignal.timeout(DAYTONA_SNAPSHOT_CREATE_TIMEOUT_MS),
         });
 
       // Create snapshot in the user's Daytona org from the public pinned GHCR image.
       console.log(
-        `[daytona-onboarding] creating snapshot ${snapshotName} from ${imageRef} in org ${opts.daytonaOrgId} (region=${targetRegion})`,
+        `[daytona-onboarding] creating snapshot ${snapshotName} from ${imageRef} in org ${opts.daytonaOrgId} (region=${targetRegion}, timeout=${DAYTONA_SNAPSHOT_CREATE_TIMEOUT_MS}ms)`,
       );
-      let createRes = await postCreateSnapshot();
+      let createRes: Response;
+      try {
+        createRes = await postCreateSnapshot();
+      } catch (createErr) {
+        const createClassified = classifyDaytonaError(
+          createErr,
+          createErr instanceof Error ? createErr.message : String(createErr),
+        );
+        // Daytona may accept POST /snapshots asynchronously while the HTTP response
+        // times out during initial manifest fetch. Treat timeouts as pulling so
+        // /status continues polling cleanly for up to 8 minutes instead of falsely failing.
+        if (createClassified.code === 'DAYTONA_TIMEOUT') {
+          console.warn(
+            `[daytona-onboarding] POST /snapshots timed out for ${snapshotName} in org ${opts.daytonaOrgId}; treating as pulling`,
+          );
+          await updateUserSnapshotDbState(opts.userId, {
+            snapshotName,
+            snapshotStatus: 'pulling',
+            snapshotError: null,
+          });
+          return {
+            snapshotName,
+            snapshotStatus: 'pulling',
+            snapshotErrorCode: null,
+            snapshotError: null,
+            reconnectRequired: false,
+          };
+        }
+        throw createErr;
+      }
 
       if (isDaytonaCredentialRejectedStatus(createRes.status)) {
         if (opts.userId) invalidateUserDaytonaCache(opts.userId);
@@ -777,7 +820,8 @@ export function ensureUserSnapshot(opts: {
  */
 export async function ensureUserSnapshotActive(
   ctx: UserDaytonaContext,
-  waitTimeoutMs = 150_000,
+  waitTimeoutMs = DAYTONA_SNAPSHOT_PULL_GRACE_MS,
+  opts?: { onPulling?: (snapshotName: string) => void },
 ): Promise<{ snapshotName: string }> {
   const imageRef = getPinnedGhcrSandboxImage();
   if (!imageRef) {
@@ -796,6 +840,13 @@ export async function ensureUserSnapshotActive(
   }
 
   const deadline = Date.now() + waitTimeoutMs;
+  let notifiedPulling = false;
+  const notifyPulling = (name: string) => {
+    if (notifiedPulling) return;
+    notifiedPulling = true;
+    opts?.onPulling?.(name || expectedName);
+  };
+
   let last = await ensureUserSnapshot({
     userId: ctx.userId,
     apiKey: ctx.apiKey,
@@ -803,10 +854,15 @@ export async function ensureUserSnapshotActive(
     daytonaRegion: ctx.daytonaRegion,
   });
 
-  while (last.snapshotStatus === 'pending' || last.snapshotStatus === 'pulling') {
+  while (
+    last.snapshotStatus === 'pending' ||
+    last.snapshotStatus === 'pulling' ||
+    (last.snapshotStatus === 'failed' && last.snapshotErrorCode === 'DAYTONA_TIMEOUT')
+  ) {
+    notifyPulling(last.snapshotName);
     if (Date.now() >= deadline) {
       throw new SnapshotStillBuildingError(
-        `Your private Daytona cloud computer image (${last.snapshotName}) is still being prepared. Please retry in a few seconds.`,
+        `Your private Daytona cloud computer image (${last.snapshotName || expectedName}) is still being prepared. Please retry in a few seconds.`,
       );
     }
     await new Promise((r) => setTimeout(r, 2_500));
@@ -1046,7 +1102,8 @@ export async function startDaytonaConnect(): Promise<StartDaytonaConnectResult> 
   const verificationUriComplete =
     dc.verification_uri_complete ||
     `${dc.verification_uri}?user_code=${encodeURIComponent(dc.user_code)}`;
-  const expiresAt = new Date(Date.now() + Math.max(expiresIn, 600) * 1_000);
+  // Match WorkOS's real expires_in TTL so expired codes transition cleanly to 'expired'.
+  const expiresAt = new Date(Date.now() + expiresIn * 1_000);
 
   await db.insert(daytonaConnectFlows).values({
     flowId,
@@ -1377,7 +1434,11 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
       if (errCode === 'slow_down') {
         return { status: 'pending', slowDown: true };
       }
-      if (errCode === 'expired_token' || errCode === 'access_denied') {
+      if (
+        errCode === 'expired_token' ||
+        errCode === 'access_denied' ||
+        errCode === 'invalid_grant'
+      ) {
         await db
           .update(daytonaConnectFlows)
           .set({ status: 'expired', updatedAt: new Date() })
@@ -1437,17 +1498,19 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
       })
       .where(eq(daytonaConnectFlows.flowId, flowId));
 
-    // Start pulling the user's pinned GHCR snapshot immediately in the background
-    // while they complete Step 2 sign-in.
-    void ensureUserSnapshot({
-      apiKey: permanentApiKey,
-      daytonaOrgId: org.id,
-      daytonaRegion: region,
-    }).catch((err) => {
-      console.warn(
-        '[daytona-onboarding] background pre-claim snapshot pull failed:',
-        err instanceof Error ? err.message : String(err),
-      );
+    // Fire-and-forget: kick off the 6 GB GHCR snapshot pull strictly asynchronously
+    // AFTER returning approved, so /poll never blocks or fails on snapshot creation.
+    setImmediate(() => {
+      void ensureUserSnapshot({
+        apiKey: permanentApiKey,
+        daytonaOrgId: org.id,
+        daytonaRegion: region,
+      }).catch((err) => {
+        console.warn(
+          '[daytona-onboarding] background pre-claim snapshot pull failed:',
+          err instanceof Error ? err.message : String(err),
+        );
+      });
     });
 
     return {
@@ -1567,22 +1630,55 @@ export async function claimDaytonaConnect(
 
   invalidateUserDaytonaCache(userId);
 
-  const snap = await ensureUserSnapshot({
-    userId,
-    apiKey: plaintextApiKey,
-    daytonaOrgId: flow.daytonaOrgId,
-    daytonaRegion: region,
+  // Trigger snapshot pull strictly asynchronously so /claim returns immediately
+  // and the client transitions smoothly into the live 3-stage setup progress screen.
+  const verifiedCacheKey = initialSnapshotName ? `${flow.daytonaOrgId}:${initialSnapshotName}` : null;
+  const alreadyActive =
+    verifiedCacheKey !== null &&
+    verifiedActiveSnapshotCache.get(verifiedCacheKey) !== undefined &&
+    Date.now() - (verifiedActiveSnapshotCache.get(verifiedCacheKey) ?? 0) < SNAPSHOT_ACTIVE_VERIFY_TTL_MS;
+
+  if (alreadyActive && initialSnapshotName) {
+    await updateUserSnapshotDbState(userId, {
+      snapshotName: initialSnapshotName,
+      snapshotStatus: 'active',
+      snapshotError: null,
+    });
+    return {
+      connected: true,
+      orgId: flow.daytonaOrgId,
+      region,
+      snapshotName: initialSnapshotName,
+      snapshotStatus: 'active',
+      snapshotErrorCode: null,
+      snapshotError: null,
+      reconnectRequired: false,
+    };
+  }
+
+  setImmediate(() => {
+    void ensureUserSnapshot({
+      userId,
+      apiKey: plaintextApiKey,
+      daytonaOrgId: flow.daytonaOrgId!,
+      daytonaRegion: region,
+    }).catch((err) => {
+      console.warn(
+        '[daytona-onboarding] post-claim background snapshot pull failed:',
+        err instanceof Error ? err.message : String(err),
+      );
+    });
   });
 
   return {
     connected: true,
     orgId: flow.daytonaOrgId,
     region,
-    snapshotName: snap.snapshotName || initialSnapshotName,
-    snapshotStatus: snap.snapshotStatus,
-    snapshotErrorCode: snap.snapshotErrorCode,
-    snapshotError: snap.snapshotError,
-    reconnectRequired: Boolean(snap.reconnectRequired),
+    snapshotName: initialSnapshotName,
+    snapshotStatus: 'pulling',
+    snapshotErrorCode: null,
+    snapshotError: null,
+    reconnectRequired: false,
   };
 }
 
@@ -1639,6 +1735,25 @@ export async function getDaytonaOnboardingStatus(
           daytonaOrgId: ctx.daytonaOrgId,
           daytonaRegion: ctx.daytonaRegion,
         });
+        // Keep returning 'pulling' during a cold 6 GB pull if a single status check hits a transient timeout.
+        const pullAgeMs = row.createdAt ? Date.now() - row.createdAt.getTime() : 0;
+        if (
+          snap.snapshotStatus === 'failed' &&
+          snap.snapshotErrorCode === 'DAYTONA_TIMEOUT' &&
+          (row.snapshotStatus === 'pulling' || row.snapshotStatus === 'pending') &&
+          pullAgeMs < DAYTONA_SNAPSHOT_PULL_GRACE_MS
+        ) {
+          return {
+            connected: true,
+            orgId: ctx.daytonaOrgId,
+            region: ctx.daytonaRegion,
+            snapshotName: snap.snapshotName || row.snapshotName,
+            snapshotStatus: 'pulling',
+            snapshotErrorCode: null,
+            snapshotError: null,
+            reconnectRequired: false,
+          };
+        }
         return {
           connected: true,
           orgId: ctx.daytonaOrgId,
@@ -1769,22 +1884,55 @@ export async function saveManualDaytonaKey(
 
   invalidateUserDaytonaCache(userId);
 
-  const snap = await ensureUserSnapshot({
-    userId,
-    apiKey,
-    daytonaOrgId: detectedOrgId,
-    daytonaRegion: detectedRegion,
+  const verifiedCacheKey = initialSnapshotName ? `${detectedOrgId}:${initialSnapshotName}` : null;
+  const alreadyActive =
+    verifiedCacheKey !== null &&
+    verifiedActiveSnapshotCache.get(verifiedCacheKey) !== undefined &&
+    Date.now() - (verifiedActiveSnapshotCache.get(verifiedCacheKey) ?? 0) < SNAPSHOT_ACTIVE_VERIFY_TTL_MS;
+
+  if (alreadyActive && initialSnapshotName) {
+    await updateUserSnapshotDbState(userId, {
+      snapshotName: initialSnapshotName,
+      snapshotStatus: 'active',
+      snapshotError: null,
+    });
+    return {
+      connected: true,
+      orgId: detectedOrgId,
+      region: detectedRegion,
+      snapshotName: initialSnapshotName,
+      snapshotStatus: 'active',
+      snapshotErrorCode: null,
+      snapshotError: null,
+      reconnectRequired: false,
+    };
+  }
+
+  // Trigger snapshot pull strictly asynchronously so manual key entry also enters
+  // the workspace immediately while the image prepares in the background.
+  setImmediate(() => {
+    void ensureUserSnapshot({
+      userId,
+      apiKey,
+      daytonaOrgId: detectedOrgId,
+      daytonaRegion: detectedRegion,
+    }).catch((err) => {
+      console.warn(
+        '[daytona-onboarding] background manual-key snapshot pull failed:',
+        err instanceof Error ? err.message : String(err),
+      );
+    });
   });
 
   return {
     connected: true,
     orgId: detectedOrgId,
     region: detectedRegion,
-    snapshotName: snap.snapshotName || initialSnapshotName,
-    snapshotStatus: snap.snapshotStatus,
-    snapshotErrorCode: snap.snapshotErrorCode,
-    snapshotError: snap.snapshotError,
-    reconnectRequired: Boolean(snap.reconnectRequired),
+    snapshotName: initialSnapshotName,
+    snapshotStatus: 'pulling',
+    snapshotErrorCode: null,
+    snapshotError: null,
+    reconnectRequired: false,
   };
 }
 

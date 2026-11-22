@@ -239,11 +239,13 @@ export async function openNotRunningBox(
       runtime_session_id: null,
       runtime_url: sessionRuntimeUrlPath(row.externalId),
       reason:
-        providerStatus !== 'stopped'
-          ? 'runtime_status_unknown'
-          : stopUnconfirmed
-            ? 'runtime_stop_unconfirmed'
-            : 'runtime_waking',
+        providerStatus === 'starting'
+          ? 'runtime_waking'
+          : providerStatus !== 'stopped'
+            ? 'runtime_status_unknown'
+            : stopUnconfirmed
+              ? 'runtime_stop_unconfirmed'
+              : 'runtime_waking',
     };
   }
   return null;

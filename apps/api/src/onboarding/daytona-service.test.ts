@@ -3,11 +3,13 @@ import { afterEach, describe, it } from 'node:test';
 import {
   classifyDaytonaError,
   ensureDefaultRegionOnOrg,
+  ensureUserSnapshot,
   fetchOrganizationsWithPropagationRetry,
   mintPermanentDaytonaKey,
   resolvePreferredSharedRegion,
   sanitizeStoredDaytonaError,
 } from './daytona-service';
+import { ensureDaytonaCapacitySlot } from '../projects/compute-quota-guard';
 
 const originalFetch = globalThis.fetch;
 
@@ -143,5 +145,90 @@ describe('daytona onboarding region, org propagation & key collision handling', 
     assert.equal(minted, 'dtn_' + 'unit_test_fixture_value');
     assert.deepEqual(deleted, ['kortix-app-1']);
     assert.equal(postAttempts, 2);
+  });
+
+  it('treats POST /snapshots HTTP timeout as pulling rather than falsely failing', async () => {
+    const prevImage = process.env.KORTIX_SANDBOX_GHCR_IMAGE;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      const method = (init?.method || 'GET').toUpperCase();
+      if (method === 'GET' && url.includes('/snapshots/')) {
+        return new Response('Not Found', { status: 404 });
+      }
+      if (method === 'POST' && url.endsWith('/snapshots')) {
+        const timeoutErr = new Error('The operation was aborted due to timeout');
+        timeoutErr.name = 'TimeoutError';
+        throw timeoutErr;
+      }
+      return new Response('unexpected', { status: 500 });
+    }) as unknown as typeof fetch;
+
+    try {
+      const res = await ensureUserSnapshot({
+        apiKey: 'dtn_' + 'unit_test_timeout_key',
+        daytonaOrgId: 'org-timeout-check',
+        daytonaRegion: 'eu',
+      });
+      // When KORTIX_SANDBOX_GHCR_IMAGE is configured in env, timeout stays in 'pulling'.
+      if (prevImage) {
+        assert.equal(res.snapshotStatus, 'pulling');
+        assert.equal(res.snapshotErrorCode, null);
+      } else {
+        assert.equal(res.snapshotStatus, 'failed');
+      }
+    } finally {
+      if (prevImage === undefined) delete process.env.KORTIX_SANDBOX_GHCR_IMAGE;
+      else process.env.KORTIX_SANDBOX_GHCR_IMAGE = prevImage;
+    }
+  });
+
+  it('skips listStopped and disk archival when skipDiskEviction is true (warm stopped resume)', async () => {
+    let listStartedCalls = 0;
+    let listStoppedCalls = 0;
+    const archived: string[] = [];
+    const stopped: string[] = [];
+
+    await ensureDaytonaCapacitySlot(
+      'resume:warm-target',
+      {
+        listStarted: async () => {
+          listStartedCalls++;
+          return [
+            {
+              id: 'sb-running-1',
+              cpu: 2,
+              memory: 4,
+              createdAt: '2026-11-22T00:00:00Z',
+              lastActivityAt: '2026-11-22T01:00:00Z',
+              managed: true,
+            },
+          ];
+        },
+        listStopped: async () => {
+          listStoppedCalls++;
+          return [
+            { id: 'sb-stopped-1', disk: 10, lastActivityAt: '2026-11-22T00:00:00Z', managed: true },
+            { id: 'sb-stopped-2', disk: 10, lastActivityAt: '2026-11-22T00:30:00Z', managed: true },
+          ];
+        },
+        stop: async (id) => {
+          stopped.push(id);
+          return true;
+        },
+        archive: async (id) => {
+          archived.push(id);
+          return true;
+        },
+        getState: async () => 'stopped',
+      },
+      { maxRunning: 2, maxNonArchived: 3, skipDiskEviction: true },
+      'warm-target',
+      'org-warm-test',
+    );
+
+    assert.equal(listStartedCalls, 1);
+    assert.equal(listStoppedCalls, 0);
+    assert.deepEqual(stopped, []);
+    assert.deepEqual(archived, []);
   });
 });

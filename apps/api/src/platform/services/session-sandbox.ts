@@ -616,7 +616,10 @@ export async function provisionSessionSandbox(opts: {
       );
       const userDaytona = await resolveDaytonaContextForOwner({ userId, accountId });
       if (userDaytona) {
-        const ensured = await ensureUserSnapshotActive(userDaytona);
+        const ensured = await ensureUserSnapshotActive(userDaytona, undefined, {
+          onPulling: (snapshotName) =>
+            reportImageStep({ state: 'waiting_for_provider', image: snapshotName }),
+        });
         return {
           snapshotName: ensured.snapshotName,
           slug,

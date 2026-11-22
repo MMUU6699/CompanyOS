@@ -116,6 +116,10 @@ interface OnboardingCopy {
   errorTitleGeneric: string;
   errorBodyGeneric: string;
   expiredError: string;
+  bgPreparing: string;
+  bgActivating: string;
+  retryShort: string;
+  reconnectShort: string;
 }
 
 const EN_COPY: OnboardingCopy = {
@@ -147,7 +151,7 @@ const EN_COPY: OnboardingCopy = {
     },
     {
       title: 'Automatic one-time setup',
-      body: 'Sign in with Google or GitHub once. Kortix configures your region, key, and workspace in ~1 minute.',
+      body: 'Sign in with Google or GitHub once. Kortix configures your region, key, and workspace in 2–4 minutes (one-time setup).',
     },
   ],
   manualToggle: 'Advanced: Paste Daytona API key',
@@ -160,7 +164,7 @@ const EN_COPY: OnboardingCopy = {
   step1Done: 'Step 1 complete · Daytona connected',
   change: 'Change',
   setupTitle: 'Preparing your private cloud computer',
-  setupSubtitle: 'One-time workspace setup. This usually completes in under a minute.',
+  setupSubtitle: 'One-time workspace setup. First-time image pull usually takes 2–4 minutes.',
   stageRegion: 'Workspace region configured',
   stageImagePull: 'Downloading cloud computer image',
   stageImageActivate: 'Activating cloud computer image',
@@ -187,6 +191,10 @@ const EN_COPY: OnboardingCopy = {
   errorBodyGeneric:
     'We could not finish preparing your cloud computer right now. Retry setup or reconnect Daytona.',
   expiredError: 'The Daytona confirmation code expired. Generate a new code to continue.',
+  bgPreparing: 'Preparing your cloud computer in the background…',
+  bgActivating: 'Activating your cloud computer in the background…',
+  retryShort: 'Retry',
+  reconnectShort: 'Reconnect',
 };
 
 const AR_COPY: OnboardingCopy = {
@@ -218,7 +226,7 @@ const AR_COPY: OnboardingCopy = {
     },
     {
       title: 'إعداد تلقائي لمرة واحدة',
-      body: 'سجّل الدخول عبر Google أو GitHub مرة واحدة، وسيقوم Kortix بضبط المنطقة والمفتاح وبيئة العمل تلقائياً خلال دقيقة.',
+      body: 'سجّل الدخول عبر Google أو GitHub مرة واحدة، وسيقوم Kortix بضبط المنطقة والمفتاح وبيئة العمل تلقائياً خلال 2–4 دقائق (إعداد لمرة واحدة).',
     },
   ],
   manualToggle: 'متقدم: لصق مفتاح Daytona API يدوياً',
@@ -231,7 +239,7 @@ const AR_COPY: OnboardingCopy = {
   step1Done: 'اكتملت الخطوة 1 · تم ربط Daytona',
   change: 'تغيير',
   setupTitle: 'جارٍ تجهيز حاسوبك السحابي الخاص',
-  setupSubtitle: 'إعداد لمرة واحدة لمساحة العمل. يستغرق عادة أقل من دقيقة.',
+  setupSubtitle: 'إعداد لمرة واحدة لمساحة العمل. يستغرق التنزيل الأول عادة 2–4 دقائق.',
   stageRegion: 'تم ضبط منطقة مساحة العمل',
   stageImagePull: 'جارٍ تنزيل صورة الحاسوب السحابي',
   stageImageActivate: 'جارٍ تفعيل صورة الحاسوب السحابي',
@@ -258,6 +266,10 @@ const AR_COPY: OnboardingCopy = {
   errorBodyGeneric:
     'تعذّر إكمال تجهيز الحاسوب السحابي الآن. أعد المحاولة أو أعد ربط Daytona.',
   expiredError: 'انتهت صلاحية رمز التأكيد. أنشئ رمزاً جديداً للمتابعة.',
+  bgPreparing: 'جارٍ تجهيز حاسوبك السحابي في الخلفية…',
+  bgActivating: 'جارٍ تفعيل حاسوبك السحابي في الخلفية…',
+  retryShort: 'إعادة المحاولة',
+  reconnectShort: 'إعادة الربط',
 };
 
 function useOnboardingCopy(): { copy: OnboardingCopy; isRtl: boolean } {
@@ -510,7 +522,10 @@ export function DaytonaStepCard({
     setInfoMessage(null);
     setPhase('starting');
 
-    const popup = typeof window !== 'undefined' ? window.open('', '_blank', 'noopener,noreferrer') : null;
+    // Open a controllable blank handle WITHOUT `noopener,noreferrer` inside the click gesture:
+    // passing `noopener` returns `null` per HTML spec and strands an orphan `about:blank` tab.
+    // Navigate via `location.replace(...)` FIRST, then sever `popup.opener`.
+    const popup = typeof window !== 'undefined' ? window.open('', '_blank') : null;
 
     try {
       const started = await startDaytonaConnect();
@@ -521,14 +536,27 @@ export function DaytonaStepCard({
       activeFlowIdRef.current = started.flowId;
 
       if (popup && !popup.closed) {
-        popup.location.href = started.verificationUriComplete;
+        try {
+          popup.location.replace(started.verificationUriComplete);
+        } catch {
+          popup.location.href = started.verificationUriComplete;
+        }
+        try {
+          popup.opener = null;
+        } catch {
+          // Ignore cross-browser readonly opener guards.
+        }
       } else if (typeof window !== 'undefined') {
         window.open(started.verificationUriComplete, '_blank', 'noopener,noreferrer');
       }
 
       schedulePoll(started.flowId, pollIntervalMsRef.current);
     } catch (err) {
-      if (popup && !popup.closed) popup.close();
+      if (popup && !popup.closed) {
+        try {
+          popup.close();
+        } catch {}
+      }
       setPhase('idle');
       setErrorMessage(
         sanitizeUiErrorMessage(
@@ -943,7 +971,10 @@ export function DaytonaOnboardingGate({ children }: { children?: React.ReactNode
     return <>{children}</>;
   }
 
-  // First-time snapshot preparation screen with clear 3-stage vertical progress.
+  // Non-blocking background snapshot preparation: let the user enter Chat/Home immediately
+  // while Daytona finishes pulling/activating their pinned GHCR image in the background.
+  // If the user sends a message early, `/start` streams inline image-preparation progress
+  // (`boot.image = { state: 'waiting_for_provider' }`) and launches automatically once active.
   if (
     !forcedReconnect &&
     status?.connected &&
@@ -952,55 +983,28 @@ export function DaytonaOnboardingGate({ children }: { children?: React.ReactNode
       status.snapshotStatus === 'pulling' ||
       status.snapshotStatus === 'inactive')
   ) {
-    const activeStageLabel =
-      status.snapshotStatus === 'inactive' ? copy.stageImageActivate : copy.stageImagePull;
+    const bannerText =
+      status.snapshotStatus === 'inactive' ? copy.bgActivating : copy.bgPreparing;
     return (
-      <div dir={isRtl ? 'rtl' : 'ltr'} className="bg-background grid h-dvh place-items-center p-6">
-        <div className="bg-card border-border w-full max-w-md space-y-6 rounded-2xl border p-6">
-          <div className="flex items-center justify-between">
-            <KortixLogo variant="icon" size={22} className="text-foreground" />
-            <span className="bg-background border-border text-muted-foreground rounded-full border px-2.5 py-0.5 font-mono text-xs uppercase">
-              {status.region || 'eu'}
-            </span>
-          </div>
-
-          <div className="space-y-1.5">
-            <h1 className="text-foreground text-lg font-medium tracking-tight">{copy.setupTitle}</h1>
-            <p className="text-muted-foreground text-sm leading-relaxed">{copy.setupSubtitle}</p>
-          </div>
-
-          <ol className="bg-background border-border divide-border divide-y rounded-xl border text-xs">
-            <li className="flex items-center gap-3 px-3.5 py-3">
-              <CheckCircleIcon className="size-4 shrink-0 text-[var(--kortix-green)]" weight="fill" />
-              <span className="text-foreground font-medium">{copy.stageRegion}</span>
-            </li>
-            <li className="flex items-center gap-3 px-3.5 py-3">
-              <Loading className="size-4 shrink-0" />
-              <span className="text-foreground font-medium">{activeStageLabel}</span>
-            </li>
-            <li className="flex items-center gap-3 px-3.5 py-3">
-              <span className="border-border inline-flex size-4 shrink-0 rounded-full border" />
-              <span className="text-muted-foreground">{copy.stageReady}</span>
-            </li>
-          </ol>
-
-          <p className="text-muted-foreground text-xs">{copy.oneTimeHint}</p>
-
-          <div className="flex items-center justify-between border-t border-border pt-3">
-            <Button type="button" variant="ghost" size="sm" onClick={() => void performSignOut()}>
-              {copy.signOut}
-            </Button>
-            <Button type="button" variant="outline" size="sm" onClick={() => void statusQuery.refetch()}>
-              <ArrowClockwiseIcon className="size-3.5 shrink-0" />
-              {copy.checkNow}
-            </Button>
+      <>
+        {children}
+        <div
+          dir={isRtl ? 'rtl' : 'ltr'}
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed inset-x-0 top-3 z-40 flex justify-center px-4"
+        >
+          <div className="bg-card/95 border-border text-foreground pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-full border px-3.5 py-1.5 text-xs shadow-sm backdrop-blur">
+            <Loading className="size-3.5 shrink-0" />
+            <span className="truncate font-medium">{bannerText}</span>
           </div>
         </div>
-      </div>
+      </>
     );
   }
 
-  // Polished error recovery card (never renders raw JSON).
+  // Connected error recovery: non-blocking compact top banner for transient failures;
+  // full-screen card ONLY when reconnect/region action is genuinely required.
   if (
     !forcedReconnect &&
     status?.connected &&
@@ -1011,6 +1015,40 @@ export function DaytonaOnboardingGate({ children }: { children?: React.ReactNode
       status.snapshotError,
     );
     const presentation = resolveErrorPresentation(errCode, copy);
+
+    if (!status.reconnectRequired && !presentation.preferReconnect) {
+      return (
+        <>
+          {children}
+          <div
+            dir={isRtl ? 'rtl' : 'ltr'}
+            role="status"
+            aria-live="polite"
+            className="pointer-events-none fixed inset-x-0 top-3 z-40 flex justify-center px-4"
+          >
+            <div className="bg-card/95 border-border text-foreground pointer-events-auto inline-flex max-w-full flex-wrap items-center gap-2 rounded-full border px-3.5 py-1.5 text-xs shadow-sm backdrop-blur">
+              <WarningCircleIcon className="text-destructive size-3.5 shrink-0" />
+              <span className="font-medium">{presentation.title}</span>
+              <button
+                type="button"
+                onClick={() => void statusQuery.refetch()}
+                className="text-foreground hover:text-muted-foreground inline-flex items-center gap-1 font-medium underline underline-offset-2 transition-colors"
+              >
+                <ArrowClockwiseIcon className="size-3 shrink-0" />
+                {copy.retryShort}
+              </button>
+              <button
+                type="button"
+                onClick={() => setForcedReconnect(true)}
+                className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 transition-colors"
+              >
+                {copy.reconnectShort}
+              </button>
+            </div>
+          </div>
+        </>
+      );
+    }
 
     const handleRecoveryManualSave = async (e: FormEvent<HTMLFormElement>) => {
       e.preventDefault();

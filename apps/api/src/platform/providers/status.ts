@@ -17,7 +17,7 @@
  * Its own module so the type is importable by pure decision code (state maps,
  * policy functions) without dragging in the provider registry and its config.
  */
-export type SandboxStatus = 'running' | 'stopped' | 'removed' | 'terminal' | 'unknown';
+export type SandboxStatus = 'running' | 'starting' | 'stopped' | 'removed' | 'terminal' | 'unknown';
 
 /**
  * The provider says the box (or the resource asked for) does not exist: an

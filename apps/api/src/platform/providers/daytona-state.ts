@@ -24,11 +24,14 @@ import type { SandboxStatus } from './status';
 
 const DAYTONA_STATE_MAP: Record<string, SandboxStatus> = {
   started: 'running',
-  starting: 'running',
-  restoring: 'running',
-  pending_start: 'running',
   running: 'running',
   active: 'running',
+  // Transitional wake/unarchive states must NOT report 'running': finalizing
+  // `session_sandboxes.status = 'active'` while Daytona is still restoring an
+  // archived container triggers the 30s unreachable timeout and 120s cooldown.
+  starting: 'starting',
+  restoring: 'starting',
+  pending_start: 'starting',
   stopped: 'stopped',
   stopping: 'stopped',
   pending_stop: 'stopped',

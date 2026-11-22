@@ -268,9 +268,11 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
 
           // ONE server call: POST /start idempotently provisions/resumes the
           // sandbox AND resolves the runtime's root session server-side.
+          // Pass waitMs=15_000 for web parity so warm resumes settle inside one
+          // server-side long-poll instead of churning fast HTTP retries.
           let start: SessionStartResult;
           try {
-            start = await startProjectSession(projectId, sessionId);
+            start = await startProjectSession(projectId, sessionId, { waitMs: 15_000 });
             requestFailures = 0;
           } catch (err) {
             if (getUpgradeGate(err)) throw err; // the outer catch opens the upgrade sheet

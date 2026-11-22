@@ -314,7 +314,7 @@ export function reclaimDaytonaDiskSlots(
 export function ensureDaytonaCapacitySlot(
   reason: string,
   deps: DaytonaSlotManagerDeps,
-  limits: { maxRunning: number; maxNonArchived: number },
+  limits: { maxRunning: number; maxNonArchived: number; skipDiskEviction?: boolean },
   excludeExternalId?: string,
   partitionKey = 'default',
 ): Promise<void> {
@@ -322,10 +322,10 @@ export function ensureDaytonaCapacitySlot(
   if (existing) return existing;
 
   const run = (async (): Promise<void> => {
-    const [startedAll, stoppedAll] = await Promise.all([
-      deps.listStarted(50),
-      deps.listStopped(50),
-    ]);
+    const skipDiskEviction = Boolean(limits.skipDiskEviction);
+    const [startedAll, stoppedAll] = skipDiskEviction
+      ? [await deps.listStarted(50), [] as DaytonaStoppedSandboxSummary[]]
+      : await Promise.all([deps.listStarted(50), deps.listStopped(50)]);
     const startedKortix = startedAll.filter((sb) => sb.managed && sb.id !== excludeExternalId);
     const stoppedKortix = stoppedAll.filter(
       (sb) => sb.managed !== false && sb.id !== excludeExternalId,
@@ -343,6 +343,10 @@ export function ensureDaytonaCapacitySlot(
       );
       newlyStoppedIds.push(...stopRes.evictedIds);
     }
+
+    // Warm resume of an already-`stopped` sandbox occupies 0 net new disk slots:
+    // skip archival completely so warm resumes never pay a 15s archive wait.
+    if (skipDiskEviction) return;
 
     const totalOtherNonArchived = startedKortix.length + stoppedKortix.length;
     const maxOtherNonArchived = Math.max(0, limits.maxNonArchived - 1);

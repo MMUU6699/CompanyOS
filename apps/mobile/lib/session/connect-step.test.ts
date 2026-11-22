@@ -24,10 +24,10 @@ describe('connectStepFromStart', () => {
     ).toEqual({ kind: 'poll' });
   });
 
-  test('opens once the sandbox is active', () => {
+  test('polls while starting even if sandbox status is stale active, and opens once ready', () => {
     expect(
       connectStepFromStart({ stage: 'starting', retriable: true, sandbox: activeSandbox, failure: null }),
-    ).toEqual({ kind: 'open' });
+    ).toEqual({ kind: 'poll' });
     expect(
       connectStepFromStart({ stage: 'ready', retriable: false, sandbox: activeSandbox, failure: null }),
     ).toEqual({ kind: 'open' });

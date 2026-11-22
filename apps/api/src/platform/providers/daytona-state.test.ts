@@ -4,8 +4,14 @@ import { classifyDaytonaState } from './daytona-state';
 
 describe('classifyDaytonaState', () => {
   test('running states', () => {
-    for (const state of ['started', 'starting', 'running', 'active', 'restoring', 'pending_start']) {
+    for (const state of ['started', 'running', 'active']) {
       expect(classifyDaytonaState(state)).toBe('running');
+    }
+  });
+
+  test('transitional wake/restore states map to starting, never running', () => {
+    for (const state of ['starting', 'restoring', 'pending_start']) {
+      expect(classifyDaytonaState(state)).toBe('starting');
     }
   });
 

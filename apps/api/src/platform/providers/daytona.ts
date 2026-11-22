@@ -5,7 +5,7 @@
  * Extracted from the original account.ts provisioning logic.
  */
 
-import type { SandboxExecOptions, SandboxExecResult } from './contract';
+import type { SandboxExecOptions, SandboxExecResult, SandboxStartOptions } from './contract';
 import { isProviderNotFound } from './status';
 import { SandboxState } from '@daytonaio/sdk';
 import { SANDBOX_VERSION, config } from '../../config';
@@ -69,6 +69,41 @@ const PROVIDER_CALL_TIMEOUT_MS = configuredTimeoutMs(
   20_000,
   1_000,
 );
+// Cold unarchive + start of a 6-10 GB container in Daytona can exceed 20s.
+// Give `start()` a dedicated 90s budget (matching SDK `sandbox.start(90)`) so
+// restores finish cleanly in a single call without tripping timeout retries.
+const DAYTONA_START_TIMEOUT_MS = configuredTimeoutMs(
+  'KORTIX_DAYTONA_START_TIMEOUT_MS',
+  90_000,
+  15_000,
+);
+const USER_ORG_AUTOSTOP_MINUTES = 30;
+const USER_ORG_AUTOARCHIVE_MAX_MINUTES = 4320;
+const USER_ORG_AUTOARCHIVE_FALLBACK_MINUTES = 1440;
+
+function resolvePerUserDaytonaLifecycle(autoStopOverride?: number): {
+  autoStopInterval: number;
+  autoArchiveInterval: number;
+  autoDeleteInterval: number;
+} {
+  const autoStopInterval = Math.max(
+    1,
+    Math.min(autoStopOverride ?? USER_ORG_AUTOSTOP_MINUTES, USER_ORG_AUTOSTOP_MINUTES),
+  );
+  const configuredArchive =
+    config.KORTIX_SANDBOX_AUTOARCHIVE_MINUTES > 0
+      ? config.KORTIX_SANDBOX_AUTOARCHIVE_MINUTES
+      : USER_ORG_AUTOARCHIVE_FALLBACK_MINUTES;
+  const autoArchiveInterval = Math.max(
+    1,
+    Math.min(configuredArchive, USER_ORG_AUTOARCHIVE_MAX_MINUTES),
+  );
+  return {
+    autoStopInterval,
+    autoArchiveInterval,
+    autoDeleteInterval: config.KORTIX_SANDBOX_AUTODELETE_MINUTES,
+  };
+}
 // listManagedRunningSandboxes() pages through the org's whole managed fleet —
 // a large fleet can legitimately take longer than one single-call budget to
 // fully list, and PROVIDER_CALL_TIMEOUT_MS would then look identical to a
@@ -104,18 +139,28 @@ function handleUserAuthFailure(err: unknown, userCtx: UserDaytonaContext | null)
   }
 }
 
-function isTransientDaytonaWakeError(err: unknown): boolean {
+function isTransientDaytonaWakeError(
+  err: unknown,
+  opts: { includeTimeout?: boolean } = {},
+): boolean {
+  const includeTimeout = opts.includeTimeout ?? true;
+  const name = err instanceof Error ? err.name : '';
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  const isTimeout =
+    name === 'TimeoutError' ||
+    name === 'DaytonaTimeoutError' ||
+    msg.includes('timed out') ||
+    msg.includes('timeout') ||
+    msg.includes('etimedout');
+  if (isTimeout && !includeTimeout) return false;
   const status = (err as { status?: number; response?: { status?: number } })?.status
     ?? (err as { response?: { status?: number } })?.response?.status;
   if (status === 429 || (status !== undefined && status >= 500)) return true;
+  if (isTimeout) return true;
   return (
     msg.includes('429') ||
     msg.includes('throttler') ||
-    msg.includes('timed out') ||
-    msg.includes('timeout') ||
     msg.includes('econnreset') ||
-    msg.includes('etimedout') ||
     msg.includes('502') ||
     msg.includes('503') ||
     msg.includes('504')
@@ -132,16 +177,23 @@ async function runWithDaytonaQuotaRetry<T>(
   excludeExternalId: string | undefined,
   userCtx: UserDaytonaContext | null,
   op: () => Promise<T>,
+  opts: { skipDiskEviction?: boolean; retryOnTimeout?: boolean } = {},
 ): Promise<T> {
   const slotManagerDeps = buildSlotManagerDeps(userCtx?.apiKey);
   const partitionKey = userCtx?.daytonaOrgId ?? 'global';
-  const maxRunning = userCtx ? 2 : config.KORTIX_DAYTONA_MAX_RUNNING_SANDBOXES;
-  const maxNonArchived = userCtx ? 2 : config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES;
+  // Clean per-user Tier 1 org: 10 GiB RAM -> 2 running (8 GiB), 30 GiB Disk -> 3 non-archived (30 GiB).
+  // Legacy shared global org stays capped at 2 to preserve headroom for unrelated legacy containers.
+  const maxRunning = userCtx
+    ? 2
+    : Math.min(2, config.KORTIX_DAYTONA_MAX_RUNNING_SANDBOXES);
+  const maxNonArchived = userCtx
+    ? Math.max(3, config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES)
+    : Math.min(2, config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES);
 
   await ensureDaytonaCapacitySlot(
     reason,
     slotManagerDeps,
-    { maxRunning, maxNonArchived },
+    { maxRunning, maxNonArchived, skipDiskEviction: opts.skipDiskEviction },
     excludeExternalId,
     partitionKey,
   ).catch((err: unknown) => {
@@ -152,6 +204,7 @@ async function runWithDaytonaQuotaRetry<T>(
     );
   });
 
+  const retryOnTimeout = opts.retryOnTimeout ?? true;
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -182,7 +235,7 @@ async function runWithDaytonaQuotaRetry<T>(
             for (const id of eviction.evictedIds) runningStatusCache.delete(id);
             continue;
           }
-        } else if (isTransientDaytonaWakeError(err)) {
+        } else if (isTransientDaytonaWakeError(err, { includeTimeout: retryOnTimeout })) {
           const delayMs = attempt * 1_500;
           console.warn(
             `[DAYTONA:${partitionKey}] transient error on ${reason} (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`,
@@ -427,11 +480,7 @@ export class DaytonaProvider implements SandboxProvider {
     const daytona = userCtx?.client ?? getDaytona();
     const labels = await managedSandboxLabels(workloadType);
     const lifecycle = userCtx
-      ? {
-          autoStopInterval: Math.max(1, Math.min(opts.autoStopInterval ?? 5, 5)),
-          autoArchiveInterval: Math.max(1, Math.min(config.KORTIX_SANDBOX_AUTOARCHIVE_MINUTES, 5)),
-          autoDeleteInterval: config.KORTIX_SANDBOX_AUTODELETE_MINUTES,
-        }
+      ? resolvePerUserDaytonaLifecycle(opts.autoStopInterval)
       : daytonaLifecycle(opts.autoStopInterval);
     const createParams = {
       snapshot,
@@ -550,7 +599,7 @@ export class DaytonaProvider implements SandboxProvider {
     return { exitCode: result.exitCode, stdout: result.result ?? '', stderr: '' };
   }
 
-  async start(externalId: string): Promise<void> {
+  async start(externalId: string, opts?: SandboxStartOptions): Promise<void> {
     runningStatusCache.delete(externalId);
     const userCtx = await resolveDaytonaContextForExternalId(externalId);
     const daytona = userCtx?.client ?? getDaytona();
@@ -565,13 +614,73 @@ export class DaytonaProvider implements SandboxProvider {
       handleUserAuthFailure(err, userCtx);
       throw err;
     }
-    const runStart = () =>
-      withTimeout(
-        sandbox.start(),
-        PROVIDER_CALL_TIMEOUT_MS,
-        `Daytona start(${externalId})`,
-      );
-    await runWithDaytonaQuotaRetry(`resume:${externalId}`, externalId, userCtx, runStart);
+
+    const rawState = String(sandbox.state ?? '').trim().toLowerCase();
+    const startTimeoutSeconds = Math.max(15, Math.ceil(DAYTONA_START_TIMEOUT_MS / 1000));
+
+    // Already running: nothing to start.
+    if (rawState === 'started' || rawState === 'running' || rawState === 'active') {
+      runningStatusCache.set(externalId, Date.now());
+      return;
+    }
+
+    const emitProgress = () => {
+      if (!opts?.onProgress) return;
+      void Promise.resolve(opts.onProgress()).catch(() => {});
+    };
+
+    // Already transitioning (`starting`/`restoring`/`pending_start`): wait for
+    // the in-flight transition instead of issuing a duplicate `start()` call.
+    if (rawState === 'starting' || rawState === 'restoring' || rawState === 'pending_start') {
+      emitProgress();
+      const heartbeat = opts?.onProgress ? setInterval(emitProgress, 30_000) : null;
+      try {
+        await withTimeout(
+          sandbox.waitUntilStarted(startTimeoutSeconds),
+          DAYTONA_START_TIMEOUT_MS,
+          `Daytona waitUntilStarted(${externalId})`,
+        );
+      } finally {
+        if (heartbeat) clearInterval(heartbeat);
+      }
+    } else {
+      // Warm `stopped` sandboxes already occupy their 10 GiB disk slot: skip disk
+      // archival completely and only enforce compute (`maxRunning`) slots.
+      const isWarmStopped =
+        rawState === 'stopped' || rawState === 'stopping' || rawState === 'pending_stop';
+      const isArchived = rawState === 'archived' || rawState === 'archiving';
+      if (isArchived) emitProgress();
+      const heartbeat = isArchived && opts?.onProgress ? setInterval(emitProgress, 30_000) : null;
+      const runStart = () =>
+        withTimeout(
+          sandbox.start(startTimeoutSeconds),
+          DAYTONA_START_TIMEOUT_MS,
+          `Daytona start(${externalId})`,
+        );
+      try {
+        await runWithDaytonaQuotaRetry(`resume:${externalId}`, externalId, userCtx, runStart, {
+          skipDiskEviction: isWarmStopped,
+          retryOnTimeout: false,
+        });
+      } finally {
+        if (heartbeat) clearInterval(heartbeat);
+      }
+    }
+
+    // Upgrade pre-existing per-user sandboxes created under legacy 5m stop/archive
+    // clamps asynchronously so future resumes stay warm for 24h without delaying wake.
+    if (userCtx) {
+      const targetLifecycle = resolvePerUserDaytonaLifecycle();
+      const currentStop = Number(sandbox.autoStopInterval ?? 0);
+      const currentArchive = Number(sandbox.autoArchiveInterval ?? 0);
+      if (currentStop > 0 && currentStop < targetLifecycle.autoStopInterval) {
+        void sandbox.setAutostopInterval(targetLifecycle.autoStopInterval).catch(() => {});
+      }
+      if (currentArchive > 0 && currentArchive < targetLifecycle.autoArchiveInterval) {
+        void sandbox.setAutoArchiveInterval(targetLifecycle.autoArchiveInterval).catch(() => {});
+      }
+    }
+
     // Daytona preserves /tmp/.X1-lock across stop→start, which kills Xvfb :1
     // on existing images; heal asynchronously right after resume so Desktop
     // (:6901) is up immediately without delaying the wake response.

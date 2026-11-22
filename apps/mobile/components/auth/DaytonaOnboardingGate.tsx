@@ -35,7 +35,6 @@ import {
   ArrowSquareOutIcon,
   CaretDownIcon,
   CaretUpIcon,
-  CheckCircleIcon,
   KeyIcon,
   WarningCircleIcon,
 } from '@/lib/icons';
@@ -83,6 +82,10 @@ interface GateCopy {
   errorBodyQuota: string;
   errorTitleGeneric: string;
   errorBodyGeneric: string;
+  bgPreparing: string;
+  bgActivating: string;
+  retryShort: string;
+  reconnectShort: string;
 }
 
 const EN_GATE: GateCopy = {
@@ -116,6 +119,10 @@ const EN_GATE: GateCopy = {
   errorTitleGeneric: 'Cloud computer setup paused',
   errorBodyGeneric:
     'We could not finish preparing your cloud computer right now. Retry setup or reconnect Daytona.',
+  bgPreparing: 'Preparing your cloud computer in the background…',
+  bgActivating: 'Activating your cloud computer in the background…',
+  retryShort: 'Retry',
+  reconnectShort: 'Reconnect',
 };
 
 const AR_GATE: GateCopy = {
@@ -149,6 +156,10 @@ const AR_GATE: GateCopy = {
   errorTitleGeneric: 'توقف إعداد الحاسوب السحابي مؤقتاً',
   errorBodyGeneric:
     'تعذّر إكمال تجهيز الحاسوب السحابي الآن. أعد المحاولة أو أعد ربط Daytona.',
+  bgPreparing: 'جارٍ تجهيز حاسوبك السحابي في الخلفية…',
+  bgActivating: 'جارٍ تفعيل حاسوبك السحابي في الخلفية…',
+  retryShort: 'إعادة المحاولة',
+  reconnectShort: 'إعادة الربط',
 };
 
 function resolveGateError(
@@ -322,7 +333,10 @@ export function DaytonaOnboardingGate() {
     return null;
   }
 
-  // First-time GHCR snapshot preparation screen with crisp 3-stage vertical checklist.
+  // Non-blocking background snapshot preparation: allow immediate entry to Chat/Home
+  // while Daytona finishes pulling/activating the pinned GHCR image in the background.
+  // If the user sends early, `SessionConnecting` streams inline image progress
+  // (`boot.image = { state: 'waiting_for_provider' }`) and opens automatically once active.
   if (
     !forcedReconnect &&
     status?.connected &&
@@ -331,102 +345,43 @@ export function DaytonaOnboardingGate() {
       status.snapshotStatus === 'pulling' ||
       status.snapshotStatus === 'inactive')
   ) {
-    const activeStage =
-      status.snapshotStatus === 'inactive' ? copy.stageActivate : copy.stagePull;
+    const bannerText =
+      status.snapshotStatus === 'inactive' ? copy.bgActivating : copy.bgPreparing;
     return (
       <View
-        style={[
-          StyleSheet.absoluteFill,
-          { zIndex: 40, paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 },
-        ]}
-        className="items-center justify-center bg-background px-6">
-        <View className="w-full max-w-md gap-5 rounded-3xl border border-border bg-card p-6">
-          <View
-            className="flex-row items-center justify-between"
-            style={{ flexDirection: isAr ? 'row-reverse' : 'row' }}>
-            <KortixLogo variant="logomark" size={22} color={scheme} />
-            <View className="rounded-full border border-border bg-background px-2.5 py-1">
-              <Text variant="small" className="font-mono uppercase text-muted-foreground">
-                {status.region || 'eu'}
-              </Text>
-            </View>
-          </View>
-
-          <View className="gap-1.5">
-            <Text
-              variant="h4"
-              className="font-roobert-semibold text-foreground"
-              style={{ textAlign: isAr ? 'right' : 'left' }}>
-              {copy.setupTitle}
-            </Text>
-            <Text
-              variant="muted"
-              className="leading-5"
-              style={{ textAlign: isAr ? 'right' : 'left' }}>
-              {copy.setupSubtitle}
-            </Text>
-          </View>
-
-          <View className="overflow-hidden rounded-2xl border border-border bg-background">
-            <View
-              className="flex-row items-center gap-3 px-4 py-3.5"
-              style={{ flexDirection: isAr ? 'row-reverse' : 'row' }}>
-              <Icon as={CheckCircleIcon} size={17} color={colors.foreground} />
-              <Text variant="small" className="font-roobert-medium text-foreground">
-                {copy.stageRegion}
-              </Text>
-            </View>
-            <View
-              className="flex-row items-center gap-3 border-t border-border px-4 py-3.5"
-              style={{ flexDirection: isAr ? 'row-reverse' : 'row' }}>
-              <KortixLoader size="small" />
-              <Text variant="small" className="font-roobert-medium text-foreground">
-                {activeStage}
-              </Text>
-            </View>
-            <View
-              className="flex-row items-center gap-3 border-t border-border px-4 py-3.5"
-              style={{ flexDirection: isAr ? 'row-reverse' : 'row' }}>
-              <View className="size-4 rounded-full border border-border" />
-              <Text variant="small" className="text-muted-foreground">
-                {copy.stageReady}
-              </Text>
-            </View>
-          </View>
-
+        pointerEvents="box-none"
+        style={{
+          position: 'absolute',
+          top: insets.top + 8,
+          left: 16,
+          right: 16,
+          zIndex: 40,
+          alignItems: 'center',
+        }}>
+        <View
+          className="max-w-full flex-row items-center gap-2 rounded-full border border-border bg-card px-3.5 py-1.5"
+          style={{
+            flexDirection: isAr ? 'row-reverse' : 'row',
+            shadowColor: '#000',
+            shadowOpacity: 0.08,
+            shadowRadius: 8,
+            shadowOffset: { width: 0, height: 2 },
+            elevation: 3,
+          }}>
+          <KortixLoader size="small" />
           <Text
             variant="small"
-            className="text-muted-foreground"
-            style={{ textAlign: isAr ? 'right' : 'left' }}>
-            {copy.oneTimeHint}
+            numberOfLines={1}
+            className="flex-shrink font-roobert-medium text-foreground">
+            {bannerText}
           </Text>
-
-          <View
-            className="flex-row items-center justify-between gap-2 border-t border-border pt-3"
-            style={{ flexDirection: isAr ? 'row-reverse' : 'row' }}>
-            <Button
-              variant="ghost"
-              size="default"
-              className="rounded-full"
-              disabled={signingOut}
-              onPress={signOutAndRoute}>
-              <Text>{copy.signOut}</Text>
-            </Button>
-            <Button
-              variant="outline"
-              size="default"
-              className="rounded-full"
-              onPress={() => void statusQuery.refetch()}>
-              <Icon as={ArrowClockwiseIcon} size={15} className="text-foreground" />
-              <Text>{copy.checkNow}</Text>
-            </Button>
-          </View>
         </View>
       </View>
     );
   }
 
-  // Polished error recovery card (never renders raw JSON).
+  // Connected error recovery: non-blocking compact top banner for transient failures;
+  // full-screen recovery card ONLY when reconnect/region action is genuinely required.
   if (
     !forcedReconnect &&
     status?.connected &&
@@ -437,6 +392,63 @@ export function DaytonaOnboardingGate() {
       status.snapshotError,
     );
     const presentation = resolveGateError(errCode, copy);
+
+    if (!status.reconnectRequired && !presentation.preferReconnect) {
+      return (
+        <View
+          pointerEvents="box-none"
+          style={{
+            position: 'absolute',
+            top: insets.top + 8,
+            left: 16,
+            right: 16,
+            zIndex: 40,
+            alignItems: 'center',
+          }}>
+          <View
+            className="max-w-full flex-row flex-wrap items-center justify-center gap-2 rounded-full border border-border bg-card px-3.5 py-1.5"
+            style={{
+              flexDirection: isAr ? 'row-reverse' : 'row',
+              shadowColor: '#000',
+              shadowOpacity: 0.08,
+              shadowRadius: 8,
+              shadowOffset: { width: 0, height: 2 },
+              elevation: 3,
+            }}>
+            <Icon as={WarningCircleIcon} size={15} color={colors.destructive} />
+            <Text
+              variant="small"
+              numberOfLines={1}
+              className="flex-shrink font-roobert-medium text-foreground">
+              {presentation.title}
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                haptics.tap();
+                void statusQuery.refetch();
+              }}
+              className="flex-row items-center gap-1 px-1 py-0.5">
+              <Icon as={ArrowClockwiseIcon} size={13} className="text-foreground" />
+              <Text variant="small" className="font-roobert-medium text-foreground underline">
+                {copy.retryShort}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                haptics.tap();
+                setForcedReconnect(true);
+              }}
+              className="px-1 py-0.5">
+              <Text variant="small" className="text-muted-foreground">
+                {copy.reconnectShort}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      );
+    }
 
     const handleManualRecoverySave = async () => {
       const trimmed = manualKey.trim();
