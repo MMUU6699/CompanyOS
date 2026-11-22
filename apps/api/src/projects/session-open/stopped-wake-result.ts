@@ -10,7 +10,10 @@ import type {
 } from '@kortix/api-contract';
 import { sessionSandboxes } from '@kortix/db';
 import { type SandboxStatus } from '../../platform/providers';
-import { classifySandboxProvisioningFailure } from '../../platform/services/sandbox-provisioning-error';
+import {
+  classifySandboxProvisioningFailure,
+  SANDBOX_PROVIDER_FAILURE_MESSAGE,
+} from '../../platform/services/sandbox-provisioning-error';
 import { serializeSessionSandboxConfig } from '../lib/serializers';
 import {
   RUNTIME_BOOT_ERROR_AT_KEY,
@@ -341,7 +344,10 @@ export function sessionStartFailureFromSandbox(
     ? classifySandboxProvisioningFailure(rawProviderError)
     : null;
   const inferredSpecificFailure =
-    storedCategory === 'sandbox-provider' && inferredFailure?.category !== 'sandbox-provider'
+    storedCategory === 'sandbox-provider' &&
+    inferredFailure &&
+    (inferredFailure.category !== 'sandbox-provider' ||
+      inferredFailure.userMessage !== SANDBOX_PROVIDER_FAILURE_MESSAGE)
       ? inferredFailure
       : null;
   const category = inferredSpecificFailure?.category ?? storedCategory;

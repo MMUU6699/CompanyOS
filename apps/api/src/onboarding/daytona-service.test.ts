@@ -10,6 +10,11 @@ import {
   sanitizeStoredDaytonaError,
 } from './daytona-service';
 import { ensureDaytonaCapacitySlot } from '../projects/compute-quota-guard';
+import {
+  classifySandboxProvisioningFailure,
+  DAYTONA_DEPLETED_CREDITS_MESSAGE,
+} from '../platform/services/sandbox-provisioning-error';
+import { isSnapshotStillBuilding } from '../platform/services/sandbox-init-state';
 
 const originalFetch = globalThis.fetch;
 
@@ -230,5 +235,24 @@ describe('daytona onboarding region, org propagation & key collision handling', 
     assert.equal(listStoppedCalls, 0);
     assert.deepEqual(stopped, []);
     assert.deepEqual(archived, []);
+  });
+
+  it('classifies Daytona depleted credits suspension cleanly (not generic error or email unverified)', () => {
+    const onboarding = classifyDaytonaError(403, 'Organization is suspended: Depleted credits');
+    assert.equal(onboarding.code, 'DAYTONA_QUOTA_EXCEEDED');
+    assert.equal(onboarding.reconnectRequired, false);
+
+    const provisioning = classifySandboxProvisioningFailure(
+      new Error('Organization is suspended: Depleted credits'),
+    );
+    assert.equal(provisioning.category, 'sandbox-provider');
+    assert.equal(provisioning.transient, false);
+    assert.equal(provisioning.userMessage, DAYTONA_DEPLETED_CREDITS_MESSAGE);
+
+    const pullingErr = Object.assign(
+      new Error('Snapshot kortix-sandbox-v1 is pulling'),
+      { name: 'DaytonaError' },
+    );
+    assert.equal(isSnapshotStillBuilding(pullingErr), true);
   });
 });

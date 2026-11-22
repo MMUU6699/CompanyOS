@@ -43,6 +43,18 @@ export const SANDBOX_PROVIDER_CAPACITY_MESSAGE =
 export const SANDBOX_PROVIDER_FAILURE_MESSAGE =
   'The sandbox provider could not start this session. Try again.';
 
+export const DAYTONA_DEPLETED_CREDITS_MESSAGE =
+  'Your Daytona workspace ran out of free credits and is suspended. Add credits in your Daytona dashboard, or connect a different Daytona account in Settings → Cloud computer.';
+
+export const DAYTONA_ORG_SUSPENDED_MESSAGE =
+  'Your Daytona workspace is suspended. Verify your email or check your account status in the Daytona dashboard, or reconnect Daytona in Settings → Cloud computer.';
+
+export const DAYTONA_RECONNECT_REQUIRED_MESSAGE =
+  'Your Daytona connection expired or was revoked. Reconnect Daytona in Settings → Cloud computer to continue.';
+
+export const DAYTONA_REGION_REQUIRED_MESSAGE =
+  'Your Daytona workspace does not have a default region selected. Reconnect Daytona in Settings → Cloud computer to configure it automatically.';
+
 export const SANDBOX_PROVIDER_STORAGE_FULL_MESSAGE =
   'The sandbox provider is out of storage, so no new session can start on it. ' +
   'Try again later, or ask a workspace admin to switch the sandbox provider in Customize → Settings → Sandbox.';
@@ -91,6 +103,15 @@ const TRANSIENT_HTTP_PATTERN = /(?:->|\bstatus(?: code)?:?|\bHTTP(?:\/[\d.]+)?)\
 
 const GIT_AUTH_PATTERN =
   /could not read Username|terminal prompts disabled|Authentication failed|fatal: could not read|Invalid username or password|remote: Repository not found|HTTP 401|HTTP 403|access denied|Permission denied \(publickey\)/i;
+
+const DAYTONA_DEPLETED_CREDITS_PATTERN =
+  /depleted credits|out of credits|insufficient credits|credits? (?:exhausted|depleted)|billing suspended/i;
+const DAYTONA_ORG_SUSPENDED_PATTERN =
+  /organization is suspended|workspace is suspended|verify your email/i;
+const DAYTONA_REGION_REQUIRED_PATTERN =
+  /daytona_region_required|does not have a default region|defaultregion/i;
+const DAYTONA_RECONNECT_PATTERN =
+  /daytona_reconnect_required|api key is revoked|invalid api key|invalid credentials/i;
 
 /**
  * The project's own network-boundary config is unusable, so `resolveNetworkBoundaryBindings`
@@ -167,6 +188,18 @@ export function classifySandboxProvisioningFailure(error: unknown): SandboxProvi
   }
   if (rawMessage.startsWith(RESIDENTIAL_PROXY_PREFIX)) {
     return failure('sandbox-provider', rawMessage, rawMessage.slice(RESIDENTIAL_PROXY_PREFIX.length), false);
+  }
+  if (DAYTONA_DEPLETED_CREDITS_PATTERN.test(rawMessage)) {
+    return failure('sandbox-provider', rawMessage, DAYTONA_DEPLETED_CREDITS_MESSAGE, false);
+  }
+  if (DAYTONA_REGION_REQUIRED_PATTERN.test(rawMessage)) {
+    return failure('sandbox-provider', rawMessage, DAYTONA_REGION_REQUIRED_MESSAGE, false);
+  }
+  if (DAYTONA_ORG_SUSPENDED_PATTERN.test(rawMessage)) {
+    return failure('sandbox-provider', rawMessage, DAYTONA_ORG_SUSPENDED_MESSAGE, false);
+  }
+  if (DAYTONA_RECONNECT_PATTERN.test(rawMessage)) {
+    return failure('sandbox-provider', rawMessage, DAYTONA_RECONNECT_REQUIRED_MESSAGE, false);
   }
   const isStorageFull = STORAGE_FULL_PATTERN.test(rawMessage);
   const isCapacity = isStorageFull || CAPACITY_PATTERN.test(rawMessage);

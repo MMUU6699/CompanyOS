@@ -1,6 +1,9 @@
 import { SnapshotStillBuildingError, WarmRuntimeUnavailableError, SandboxTemplateNotFoundError } from '../providers';
 import type { CreateSandboxOpts, ProvisionResult, SandboxProvider } from '../providers';
-import { classifySandboxProvisioningFailure } from './sandbox-provisioning-error';
+import {
+  classifySandboxProvisioningFailure,
+  SANDBOX_PROVIDER_FAILURE_MESSAGE,
+} from './sandbox-provisioning-error';
 import { exponentialBackoffMs } from '../../shared/backoff';
 import { errorMessage } from '../../shared/error-message';
 
@@ -44,12 +47,15 @@ export function isFleetPlacementRefusal(error: unknown): boolean {
   return FLEET_PLACEMENT_REFUSAL.test(errorMessage(error));
 }
 
-/** The provider refused a create because it is still finishing the image (building or replicating). */
+/** The provider refused a create because it is still finishing the image (building, pulling, or replicating). */
 export function isSnapshotStillBuilding(error: unknown): boolean {
   if (error instanceof SnapshotStillBuildingError) return true;
-  // legacy: Daytona refuses a create from a snapshot it is still building with
+  // legacy: Daytona refuses a create from a snapshot it is still building/pulling with
   // only this text. Delete when Daytona types the refusal.
-  return (error as Error | null)?.name?.startsWith('Daytona') === true && /snapshot .+ is building/i.test(errorMessage(error));
+  return (
+    (error as Error | null)?.name?.startsWith('Daytona') === true &&
+    /snapshot .+ is (?:building|pulling|pending)/i.test(errorMessage(error))
+  );
 }
 
 /**
@@ -57,7 +63,9 @@ export function isSnapshotStillBuilding(error: unknown): boolean {
  * attempts. Snapshot-building keeps its separate long polling window; a fleet
  * placement refusal gets the short quick-retry window
  * (CAPACITY_QUICK_RETRY_DELAYS_MS); past it the create fails and the session's
- * next `/start` re-attempts it with backoff.
+ * next `/start` re-attempts it with backoff. Permanent provider/account
+ * refusals (depleted credits, suspended org, revoked key, missing region) fail
+ * fast on attempt 1 rather than hammering upstream 3 times.
  */
 const PROVISION_RETRY_POLICY = {
   'snapshot-building': {
@@ -69,6 +77,7 @@ const PROVISION_RETRY_POLICY = {
     delayMs: (attempt: number) => CAPACITY_QUICK_RETRY_DELAYS_MS[attempt - 1] ?? CAPACITY_QUICK_RETRY_DELAYS_MS.at(-1)!,
   },
   capacity: { maxAttempts: 1, delayMs: () => 0 },
+  permanent: { maxAttempts: 1, delayMs: () => 0 },
   generic: {
     maxAttempts: SANDBOX_INIT_MAX_ATTEMPTS,
     delayMs: (attempt: number) => exponentialBackoffMs({ attempt, baseMs: RETRY_DELAY_BASE_MS, capMs: RETRY_DELAY_MAX_MS }),
@@ -78,8 +87,18 @@ const PROVISION_RETRY_POLICY = {
 /** Which retry policy applies: the failure class of one refused create. */
 function provisionRetryClass(error: unknown): keyof typeof PROVISION_RETRY_POLICY {
   if (isSnapshotStillBuilding(error)) return 'snapshot-building';
-  if (!classifySandboxProvisioningFailure(error).isCapacity) return 'generic';
-  return isFleetPlacementRefusal(error) ? 'fleet-capacity' : 'capacity';
+  const classified = classifySandboxProvisioningFailure(error);
+  if (classified.isCapacity) {
+    return isFleetPlacementRefusal(error) ? 'fleet-capacity' : 'capacity';
+  }
+  if (
+    !classified.transient &&
+    (classified.category !== 'sandbox-provider' ||
+      classified.userMessage !== SANDBOX_PROVIDER_FAILURE_MESSAGE)
+  ) {
+    return 'permanent';
+  }
+  return 'generic';
 }
 
 /** The failure keys every builder below drops before it writes its own. */

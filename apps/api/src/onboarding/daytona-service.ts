@@ -46,7 +46,7 @@ const HUMAN_ERROR_COPY: Record<DaytonaOnboardingErrorCode, string> = {
   DAYTONA_EMAIL_UNVERIFIED:
     'Please verify your email address in Daytona, then retry setup.',
   DAYTONA_QUOTA_EXCEEDED:
-    'Your Daytona workspace reached its free compute or storage limit. Free up space in Daytona or try again shortly.',
+    'Your Daytona workspace ran out of free credits or reached its resource limit. Add credits in Daytona, free up space, or connect a different Daytona account in Settings → Cloud computer.',
   DAYTONA_SNAPSHOT_FAILED:
     'We could not prepare your private cloud computer image right now. Tap retry or reconnect Daytona.',
   DAYTONA_RECONNECT_REQUIRED:
@@ -85,6 +85,21 @@ export function classifyDaytonaError(
       code: 'DAYTONA_REGION_REQUIRED',
       message: HUMAN_ERROR_COPY.DAYTONA_REGION_REQUIRED,
       reconnectRequired: true,
+    };
+  }
+
+  if (
+    lower.includes('depleted credits') ||
+    lower.includes('out of credits') ||
+    lower.includes('insufficient credits') ||
+    lower.includes('credits depleted') ||
+    lower.includes('credits exhausted') ||
+    lower.includes('billing suspended')
+  ) {
+    return {
+      code: 'DAYTONA_QUOTA_EXCEEDED',
+      message: HUMAN_ERROR_COPY.DAYTONA_QUOTA_EXCEEDED,
+      reconnectRequired: false,
     };
   }
 
@@ -1465,9 +1480,17 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
       );
     }
     if (org.suspended) {
+      const reason = String(org.suspensionReason || '');
       console.warn(
-        `[daytona-onboarding] org ${org.id} is suspended (reason=${org.suspensionReason || 'none'})`,
+        `[daytona-onboarding] org ${org.id} is suspended (reason=${reason || 'none'})`,
       );
+      if (/credit|depleted|billing|quota/i.test(reason)) {
+        throw new DaytonaStructuredError(
+          'DAYTONA_QUOTA_EXCEEDED',
+          HUMAN_ERROR_COPY.DAYTONA_QUOTA_EXCEEDED,
+          402,
+        );
+      }
       return {
         status: 'email_verification_required',
         errorCode: 'DAYTONA_EMAIL_UNVERIFIED',
