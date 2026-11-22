@@ -254,5 +254,14 @@ describe('daytona onboarding region, org propagation & key collision handling', 
       { name: 'DaytonaError' },
     );
     assert.equal(isSnapshotStillBuilding(pullingErr), true);
+
+    const emailDenied = classifyDaytonaError(
+      403,
+      '{"statusCode":403,"error":"Forbidden","message":"Please use your primary or work email address.","code":"EMAIL_ACCESS_DENIED"}',
+    );
+    assert.equal(emailDenied.code, 'DAYTONA_EMAIL_UNVERIFIED');
+    assert.equal(emailDenied.reconnectRequired, false);
+    assert.equal(emailDenied.message.includes('primary or work email'), true);
+    assert.equal(emailDenied.message.includes('{'), false);
   });
 });

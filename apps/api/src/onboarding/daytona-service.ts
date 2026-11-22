@@ -89,6 +89,18 @@ export function classifyDaytonaError(
   }
 
   if (
+    lower.includes('email_access_denied') ||
+    lower.includes('primary or work email')
+  ) {
+    return {
+      code: 'DAYTONA_EMAIL_UNVERIFIED',
+      message:
+        'Daytona requires a primary or work email address (temporary or aliased emails are blocked). Sign in to Daytona with a primary email, Google, or GitHub account, then tap New code.',
+      reconnectRequired: false,
+    };
+  }
+
+  if (
     lower.includes('depleted credits') ||
     lower.includes('out of credits') ||
     lower.includes('insufficient credits') ||
@@ -273,6 +285,10 @@ const accountOwnerCache = new Map<string, { userId: string | null; expiresAt: nu
 const verifiedActiveSnapshotCache = new Map<string, number>(); // `${orgId}:${snapshotName}` -> verifiedAtMs
 const ensureSnapshotInFlight = new Map<string, Promise<EnsureUserSnapshotResult>>();
 const pollFlowInFlight = new Map<string, Promise<PollDaytonaConnectResult>>();
+const flowTerminalErrorCache = new Map<
+  string,
+  { code: DaytonaOnboardingErrorCode; message: string; httpStatus: number; expiresAt: number }
+>();
 
 function lruSet<K, V>(map: Map<K, V>, key: K, val: V, maxSize: number): void {
   if (map.has(key)) map.delete(key);
@@ -1385,6 +1401,14 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
   if (existing) return existing;
 
   const task = (async (): Promise<PollDaytonaConnectResult> => {
+    const cachedErr = flowTerminalErrorCache.get(flowId);
+    if (cachedErr && cachedErr.expiresAt > Date.now()) {
+      throw new DaytonaStructuredError(cachedErr.code, cachedErr.message, cachedErr.httpStatus);
+    }
+    if (cachedErr) {
+      flowTerminalErrorCache.delete(flowId);
+    }
+
     const rows = await db
       .select()
       .from(daytonaConnectFlows)
@@ -1469,37 +1493,65 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
       throw new Error('WorkOS token exchange succeeded without access_token');
     }
 
-    // Use the ephemeral WorkOS JWT solely to resolve org + set default region + mint permanent key, then discard.
-    const orgs = await fetchOrganizationsWithPropagationRetry(jwt);
-    const org = orgs.find((o) => o.personal) || orgs[0];
-    if (!org?.id) {
-      throw new DaytonaStructuredError(
-        'DAYTONA_TIMEOUT',
-        'Your new Daytona personal workspace is still initializing. Tap retry in a moment.',
-        503,
-      );
-    }
-    if (org.suspended) {
-      const reason = String(org.suspensionReason || '');
-      console.warn(
-        `[daytona-onboarding] org ${org.id} is suspended (reason=${reason || 'none'})`,
-      );
-      if (/credit|depleted|billing|quota/i.test(reason)) {
+    // WorkOS device_code is single-use: once we receive `jwt`, any subsequent call to
+    // WorkOS with this device_code returns `invalid_grant`/`expired_token`. Cache any
+    // post-JWT Daytona refusal (e.g. EMAIL_ACCESS_DENIED, Depleted credits) on `flowId`
+    // so subsequent client polls surface the real error instead of falsely reporting "expired".
+    let org: DaytonaOrgSummary;
+    let region: string;
+    let permanentApiKey: string;
+    try {
+      const orgs = await fetchOrganizationsWithPropagationRetry(jwt);
+      const foundOrg = orgs.find((o) => o.personal) || orgs[0];
+      if (!foundOrg?.id) {
         throw new DaytonaStructuredError(
-          'DAYTONA_QUOTA_EXCEEDED',
-          HUMAN_ERROR_COPY.DAYTONA_QUOTA_EXCEEDED,
-          402,
+          'DAYTONA_TIMEOUT',
+          'Your new Daytona personal workspace is still initializing. Tap New code in a moment.',
+          503,
         );
       }
-      return {
-        status: 'email_verification_required',
-        errorCode: 'DAYTONA_EMAIL_UNVERIFIED',
-        message: HUMAN_ERROR_COPY.DAYTONA_EMAIL_UNVERIFIED,
-      };
+      if (foundOrg.suspended) {
+        const reason = String(foundOrg.suspensionReason || '');
+        console.warn(
+          `[daytona-onboarding] org ${foundOrg.id} is suspended (reason=${reason || 'none'})`,
+        );
+        if (/credit|depleted|billing|quota/i.test(reason)) {
+          throw new DaytonaStructuredError(
+            'DAYTONA_QUOTA_EXCEEDED',
+            HUMAN_ERROR_COPY.DAYTONA_QUOTA_EXCEEDED,
+            402,
+          );
+        }
+        throw new DaytonaStructuredError(
+          'DAYTONA_EMAIL_UNVERIFIED',
+          HUMAN_ERROR_COPY.DAYTONA_EMAIL_UNVERIFIED,
+          400,
+        );
+      }
+      org = foundOrg;
+      region = await ensureDefaultRegionOnOrg(jwt, org.id, org.defaultRegionId);
+      permanentApiKey = await mintPermanentDaytonaKey(jwt, org.id, flowId);
+    } catch (postJwtErr) {
+      const structured =
+        postJwtErr instanceof DaytonaStructuredError
+          ? postJwtErr
+          : (() => {
+              const classified = classifyDaytonaError(postJwtErr);
+              return new DaytonaStructuredError(classified.code, classified.message, 400);
+            })();
+      lruSet(
+        flowTerminalErrorCache,
+        flowId,
+        {
+          code: structured.code,
+          message: structured.message,
+          httpStatus: structured.httpStatus,
+          expiresAt: Date.now() + 15 * 60_000,
+        },
+        500,
+      );
+      throw structured;
     }
-
-    const region = await ensureDefaultRegionOnOrg(jwt, org.id, org.defaultRegionId);
-    const permanentApiKey = await mintPermanentDaytonaKey(jwt, org.id, flowId);
 
     const encrypted = encryptDaytonaApiKey(flowId, permanentApiKey);
     const claimToken = randomBytes(32).toString('base64url');
