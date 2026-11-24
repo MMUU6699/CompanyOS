@@ -14,32 +14,38 @@ import {
   ensureDaytonaCapacitySlot,
   evictIdleRunningDaytonaSandboxes,
   reclaimDaytonaDiskSlots,
-} from '../../projects/compute-quota-guard';
-import { triggerEmergencyDiskArchiveSweep } from '../../projects/disk-quota-guard';
+  triggerEmergencyDiskArchiveSweep,
+} from '../../projects/surface';
 import {
   archiveDaytonaSandboxById,
+  fetchDaytonaOrgLimits,
   getDaytona,
   getDaytonaSandboxStateById,
+  getLearnedDaytonaOrgCap,
   isDaytonaComputeQuotaError,
   isDaytonaDiskQuotaError,
   listStartedDaytonaSandboxesOldestFirst,
   listStoppedDaytonaSandboxesOldestFirst,
+  recordLearnedDaytonaOrgCap,
   stopDaytonaSandboxById,
 } from '../../shared/daytona';
 import {
   DaytonaNotConnectedError,
   DaytonaReconnectRequiredError,
+  isDaytonaAllSandboxesBusyError,
 } from '../../shared/daytona-errors';
 import {
   ensureUserSnapshotActive,
   invalidateUserDaytonaCache,
   isDaytonaCredentialRejectedError,
+  persistLearnedDaytonaOrgCap,
   rememberExternalIdOwner,
   resolveDaytonaContextForExternalId,
   resolveDaytonaContextForOwner,
   type DaytonaContextResolution,
   type UserDaytonaContext,
 } from '../../onboarding/daytona-service';
+import { DEFAULT_CPU, DEFAULT_DISK_GB, DEFAULT_MEMORY_GB } from '../../snapshots/build-context';
 import { configuredTimeoutMs, withTimeout } from '../../shared/with-timeout';
 import { serviceKeyForExternalId } from '../service-key';
 import { sandboxFrontendBaseUrl } from '../sandbox-frontend-url';
@@ -82,19 +88,35 @@ const DAYTONA_START_TIMEOUT_MS = configuredTimeoutMs(
   90_000,
   15_000,
 );
-const USER_ORG_AUTOSTOP_MINUTES = 30;
+const USER_ORG_AUTOSTOP_MIN_MINUTES = 30;
+const USER_ORG_AUTOSTOP_MAX_MINUTES = 120;
 const USER_ORG_AUTOARCHIVE_MAX_MINUTES = 4320;
 const USER_ORG_AUTOARCHIVE_FALLBACK_MINUTES = 1440;
 
-function resolvePerUserDaytonaLifecycle(autoStopOverride?: number): {
+/**
+ * Resolve Daytona lifecycle timers for a user's own Daytona organization.
+ *
+ * Keeps the provider native `autoStopInterval` strictly above Kortix's own
+ * idle reaper grace (`KORTIX_SANDBOX_AUTOSTOP_MINUTES`, default 15m) so the
+ * last-used sandbox stays warm through the idle window and Daytona never
+ * prematurely stops a sandbox during local tool runs. Honors
+ * `KORTIX_SANDBOX_PROVIDER_AUTOSTOP_MINUTES` when set above the minimum floor.
+ */
+export function resolvePerUserDaytonaLifecycle(autoStopOverride?: number): {
   autoStopInterval: number;
   autoArchiveInterval: number;
   autoDeleteInterval: number;
 } {
-  const autoStopInterval = Math.max(
-    1,
-    Math.min(autoStopOverride ?? USER_ORG_AUTOSTOP_MINUTES, USER_ORG_AUTOSTOP_MINUTES),
+  const idleGraceFloor = Math.max(
+    USER_ORG_AUTOSTOP_MIN_MINUTES,
+    (config.KORTIX_SANDBOX_AUTOSTOP_MINUTES || 15) * 2,
   );
+  const configuredBackstop = providerAutoStopBackstopMinutes();
+  const baseStop =
+    autoStopOverride !== undefined
+      ? Math.max(1, autoStopOverride)
+      : Math.max(idleGraceFloor, configuredBackstop);
+  const autoStopInterval = Math.min(baseStop, USER_ORG_AUTOSTOP_MAX_MINUTES);
   const configuredArchive =
     config.KORTIX_SANDBOX_AUTOARCHIVE_MINUTES > 0
       ? config.KORTIX_SANDBOX_AUTOARCHIVE_MINUTES
@@ -214,6 +236,46 @@ function isTransientDaytonaWakeError(
   );
 }
 
+async function resolveEffectiveDaytonaOrgCaps(userCtx: UserDaytonaContext | null): Promise<{
+  maxRunning: number;
+  maxNonArchived: number;
+}> {
+  if (!userCtx) {
+    return {
+      maxRunning: Math.min(2, config.KORTIX_DAYTONA_MAX_RUNNING_SANDBOXES),
+      maxNonArchived: Math.min(2, config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES),
+    };
+  }
+  const live = await fetchDaytonaOrgLimits(userCtx.apiKey, userCtx.daytonaOrgId, {
+    sandboxCpu: DEFAULT_CPU,
+    sandboxMemoryGb: DEFAULT_MEMORY_GB,
+    sandboxDiskGb: DEFAULT_DISK_GB,
+  });
+  const learned = getLearnedDaytonaOrgCap(userCtx.daytonaOrgId);
+  const runningCandidates = [
+    live.maxRunningSandboxes,
+    ...(typeof userCtx.maxRunningSandboxes === 'number' && userCtx.maxRunningSandboxes >= 1
+      ? [userCtx.maxRunningSandboxes]
+      : []),
+    ...(typeof learned?.maxRunning === 'number' && learned.maxRunning >= 1
+      ? [learned.maxRunning]
+      : []),
+  ];
+  const diskCandidates = [
+    live.maxNonArchivedSandboxes,
+    ...(typeof userCtx.maxNonArchivedSandboxes === 'number' && userCtx.maxNonArchivedSandboxes >= 1
+      ? [userCtx.maxNonArchivedSandboxes]
+      : []),
+    ...(typeof learned?.maxNonArchived === 'number' && learned.maxNonArchived >= 1
+      ? [learned.maxNonArchived]
+      : []),
+  ];
+  return {
+    maxRunning: Math.max(1, Math.min(...runningCandidates)),
+    maxNonArchived: Math.max(1, Math.min(...diskCandidates)),
+  };
+}
+
 /**
  * Proactive LRU slot check + reactive quota/transient retry wrapper shared by
  * Daytona `create()` and `start()`. Partitioned strictly per `daytonaOrgId` so
@@ -228,14 +290,17 @@ async function runWithDaytonaQuotaRetry<T>(
 ): Promise<T> {
   const slotManagerDeps = buildSlotManagerDeps(userCtx?.apiKey);
   const partitionKey = userCtx?.daytonaOrgId ?? 'global';
-  // Clean per-user Tier 1 org: 10 GiB RAM -> 2 running (8 GiB), 30 GiB Disk -> 3 non-archived (30 GiB).
-  // Legacy shared global org stays capped at 2 to preserve headroom for unrelated legacy containers.
-  const maxRunning = userCtx
-    ? 2
-    : Math.min(2, config.KORTIX_DAYTONA_MAX_RUNNING_SANDBOXES);
-  const maxNonArchived = userCtx
-    ? Math.max(3, config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES)
-    : Math.min(2, config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES);
+  const { maxRunning, maxNonArchived } = await resolveEffectiveDaytonaOrgCaps(userCtx).catch(
+    (err: unknown) => {
+      handleUserAuthFailure(err, userCtx);
+      return {
+        maxRunning: userCtx ? 2 : Math.min(2, config.KORTIX_DAYTONA_MAX_RUNNING_SANDBOXES),
+        maxNonArchived: userCtx
+          ? Math.max(3, config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES)
+          : Math.min(2, config.KORTIX_DAYTONA_MAX_NON_ARCHIVED_SANDBOXES),
+      };
+    },
+  );
 
   await ensureDaytonaCapacitySlot(
     reason,
@@ -245,10 +310,15 @@ async function runWithDaytonaQuotaRetry<T>(
     partitionKey,
   ).catch((err: unknown) => {
     handleUserAuthFailure(err, userCtx);
-    console.warn(
-      `[DAYTONA:${partitionKey}] proactive LRU slot check (${reason}) skipped:`,
-      err instanceof Error ? err.message : String(err),
-    );
+    // Never swallow DaytonaAllSandboxesBusyError: all running sandboxes have
+    // active turns, so the caller must queue cleanly instead of hitting Daytona
+    // and failing with a raw memory error.
+    if (isDaytonaAllSandboxesBusyError(err)) throw err;
+    logger.warn('[DAYTONA] proactive LRU slot check skipped', {
+      partitionKey,
+      reason,
+      error: err instanceof Error ? err.message : String(err),
+    });
   });
 
   const retryOnTimeout = opts.retryOnTimeout ?? true;
@@ -267,6 +337,13 @@ async function runWithDaytonaQuotaRetry<T>(
             undefined,
             partitionKey,
           );
+          if (userCtx) {
+            const nextDiskCap = Math.max(1, maxNonArchived - 1);
+            recordLearnedDaytonaOrgCap(userCtx.daytonaOrgId, 'disk', nextDiskCap);
+            void persistLearnedDaytonaOrgCap(userCtx.daytonaOrgId, {
+              maxNonArchivedSandboxes: nextDiskCap,
+            });
+          }
           if (reclaim.archivedIds.length > 0) {
             for (const id of reclaim.archivedIds) runningStatusCache.delete(id);
             continue;
@@ -278,16 +355,27 @@ async function runWithDaytonaQuotaRetry<T>(
             excludeExternalId,
             partitionKey,
           );
+          if (userCtx && eviction.runningCount > 0) {
+            const nextRunCap = Math.max(1, Math.min(maxRunning - 1, eviction.runningCount));
+            recordLearnedDaytonaOrgCap(userCtx.daytonaOrgId, 'running', nextRunCap);
+            void persistLearnedDaytonaOrgCap(userCtx.daytonaOrgId, {
+              maxRunningSandboxes: nextRunCap,
+            });
+          }
           if (eviction.evictedIds.length > 0) {
             for (const id of eviction.evictedIds) runningStatusCache.delete(id);
             continue;
           }
         } else if (isTransientDaytonaWakeError(err, { includeTimeout: retryOnTimeout })) {
           const delayMs = attempt * 1_500;
-          console.warn(
-            `[DAYTONA:${partitionKey}] transient error on ${reason} (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`,
-            err instanceof Error ? err.message : String(err),
-          );
+          logger.warn('[DAYTONA] transient error, retrying', {
+            partitionKey,
+            reason,
+            attempt,
+            maxAttempts,
+            delayMs,
+            error: err instanceof Error ? err.message : String(err),
+          });
           await new Promise((r) => setTimeout(r, delayMs));
           continue;
         }
@@ -306,10 +394,10 @@ async function runWithDaytonaQuotaRetry<T>(
  * Always rethrows — this never rescues the request that hit the error.
  */
 function reportIfDiskQuotaError(err: unknown, reason: string, apiKey?: string): never {
-  console.error(
-    `[DAYTONA] ${reason} failed:`,
-    err instanceof Error ? err.message : String(err),
-  );
+  logger.error('[DAYTONA] sandbox operation failed', {
+    reason,
+    error: err instanceof Error ? err.message : String(err),
+  });
   if (
     isDaytonaDiskQuotaError(err) &&
     (apiKey || (config.KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK && config.DAYTONA_API_KEY))
@@ -357,11 +445,14 @@ import type {
 // provider round-trips. Only 'running' is cached (never 'stopped'/'unknown'), so
 // idle-stop / wake detection always reads fresh; start/stop/remove bust the entry.
 const STATUS_CACHE_TTL_MS = 1500;
+// replica-local: 1.5s hot-path status cache for 'running' verdicts; invalidated on start/stop/remove.
 const runningStatusCache = new Map<string, number>(); // externalId → cachedAt (ms)
 
 const DESKTOP_REPAIR_COOLDOWN_MS = 60_000;
 const DESKTOP_REPAIR_TIMEOUT_MS = 15_000;
+// replica-local: 60s per-sandbox cooldown for stale X11 desktop self-heal probes.
 const desktopRepairCooldown = new Map<string, number>();
+// replica-local: in-process single-flight dedup for stale X11 desktop self-heal commands.
 const desktopRepairInflight = new Map<string, Promise<boolean>>();
 
 /**
@@ -413,14 +504,14 @@ export function repairDaytonaDesktopIfStale(externalId: string): Promise<boolean
       );
       const repaired = Boolean(result.result?.includes('repaired'));
       if (repaired) {
-        console.log(`[DAYTONA] repaired stale X11 lock and restarted desktop on ${externalId}`);
+        logger.info('[DAYTONA] repaired stale X11 lock and restarted desktop', { externalId });
       }
       return repaired;
     } catch (err) {
-      console.warn(
-        `[DAYTONA] desktop self-heal failed for ${externalId}:`,
-        err instanceof Error ? err.message : String(err),
-      );
+      logger.warn('[DAYTONA] desktop self-heal failed', {
+        externalId,
+        error: err instanceof Error ? err.message : String(err),
+      });
       return false;
     } finally {
       desktopRepairInflight.delete(externalId);
@@ -558,9 +649,12 @@ export class DaytonaProvider implements SandboxProvider {
     const externalId = daytonaSandbox.id;
     if (userCtx) {
       rememberExternalIdOwner(externalId, userCtx.userId, userCtx.daytonaOrgId);
-      console.log(
-        `[DAYTONA] created sandbox ${externalId} in user org ${userCtx.daytonaOrgId} (region=${userCtx.daytonaRegion}, snapshot=${snapshot})`,
-      );
+      logger.info('[DAYTONA] created sandbox in user org', {
+        externalId,
+        daytonaOrgId: userCtx.daytonaOrgId,
+        region: userCtx.daytonaRegion,
+        snapshot,
+      });
     }
     const apiBase = sandboxApiBase;
     const ingressPort = workloadType === 'app' ? 8080 : 8000;
@@ -586,10 +680,10 @@ export class DaytonaProvider implements SandboxProvider {
       PROVIDER_CALL_TIMEOUT_MS,
       `Daytona eager getPreviewLink(${externalId}:${ingressPort})`,
     ).catch((err: unknown) => {
-      console.warn(
-        `[DAYTONA] eager preview-link warm for ${externalId} failed (lazy fallback):`,
-        err instanceof Error ? err.message : String(err),
-      );
+      logger.warn('[DAYTONA] eager preview-link warm failed (lazy fallback)', {
+        externalId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
 
     return {
@@ -988,7 +1082,10 @@ export class DaytonaProvider implements SandboxProvider {
         headers['Authorization'] = `Bearer ${serviceKey}`;
       }
     } catch (err) {
-      console.warn(`[DAYTONA] Failed to look up service key for ${externalId}:`, err);
+      logger.warn('[DAYTONA] Failed to look up service key', {
+        externalId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
 
     return { url: ingress.url, headers };
@@ -997,7 +1094,7 @@ export class DaytonaProvider implements SandboxProvider {
   async ensureRunning(externalId: string): Promise<void> {
     const status = await this.getStatus(externalId);
     if (status === 'running') return;
-    console.log(`[DAYTONA] Sandbox ${externalId} is ${status}, waking up...`);
+    logger.info('[DAYTONA] waking sandbox', { externalId, status });
     await this.start(externalId);
   }
 }

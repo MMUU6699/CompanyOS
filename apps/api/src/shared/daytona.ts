@@ -349,3 +349,176 @@ export async function archiveDaytonaSandboxById(id: string, apiKeyOverride?: str
     return false;
   }
 }
+
+export interface DaytonaOrgLimits {
+  orgId: string;
+  totalCpuQuota: number;
+  totalMemoryQuotaGb: number;
+  totalDiskQuotaGb: number;
+  maxRunningSandboxes: number;
+  maxNonArchivedSandboxes: number;
+  source: 'api' | 'fallback';
+  fetchedAtMs: number;
+}
+
+const ORG_LIMITS_CACHE_TTL_MS = 10 * 60_000;
+const ORG_LIMITS_FALLBACK_TTL_MS = 60_000;
+const LEARNED_CAP_TTL_MS = 30 * 60_000;
+// replica-local: 10-minute per-org Daytona usage/quota cache; safe to recompute per replica.
+const orgLimitsCache = new Map<string, { value: DaytonaOrgLimits; expiresAt: number }>();
+// replica-local: short-lived learned downward cap overrides after Daytona rejects with quota errors.
+const learnedOrgCapCache = new Map<
+  string,
+  { maxRunning?: number; maxNonArchived?: number; expiresAt: number }
+>();
+
+export function resetDaytonaOrgLimitsCache(): void {
+  orgLimitsCache.clear();
+  learnedOrgCapCache.clear();
+}
+
+export function getLearnedDaytonaOrgCap(
+  orgId: string,
+): { maxRunning?: number; maxNonArchived?: number } | null {
+  const entry = learnedOrgCapCache.get(orgId);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    learnedOrgCapCache.delete(orgId);
+    return null;
+  }
+  return { maxRunning: entry.maxRunning, maxNonArchived: entry.maxNonArchived };
+}
+
+/**
+ * Record a learned lower cap for `orgId` after Daytona rejects a create/start
+ * with a compute or disk quota error despite our estimated capacity. Bounded
+ * `>= 1` so an org is never locked to 0.
+ */
+export function recordLearnedDaytonaOrgCap(
+  orgId: string,
+  kind: 'running' | 'disk',
+  observedCap: number,
+): { maxRunning?: number; maxNonArchived?: number } {
+  const bounded = Math.max(1, Math.floor(observedCap));
+  const current = getLearnedDaytonaOrgCap(orgId) ?? {};
+  const next = {
+    maxRunning:
+      kind === 'running'
+        ? Math.min(current.maxRunning ?? bounded, bounded)
+        : current.maxRunning,
+    maxNonArchived:
+      kind === 'disk'
+        ? Math.min(current.maxNonArchived ?? bounded, bounded)
+        : current.maxNonArchived,
+    expiresAt: Date.now() + LEARNED_CAP_TTL_MS,
+  };
+  learnedOrgCapCache.set(orgId, next);
+  return { maxRunning: next.maxRunning, maxNonArchived: next.maxNonArchived };
+}
+
+/**
+ * Read live per-org quotas from `GET /organizations/:orgId/usage` (verified
+ * HTTP 200 on Daytona Cloud) and compute how many Kortix sandboxes fit inside
+ * the org's CPU, memory, and active-disk limits. Caches per org for 10 min;
+ * falls back to conservative Tier-1 defaults (2 running / 3 non-archived) if
+ * Daytona does not return quota fields.
+ */
+export async function fetchDaytonaOrgLimits(
+  apiKey: string,
+  orgId: string,
+  opts: {
+    sandboxCpu?: number;
+    sandboxMemoryGb?: number;
+    sandboxDiskGb?: number;
+    forceRefresh?: boolean;
+  } = {},
+): Promise<DaytonaOrgLimits> {
+  const nowMs = Date.now();
+  const cached = !opts.forceRefresh ? orgLimitsCache.get(orgId) : undefined;
+  if (cached && cached.expiresAt > nowMs) {
+    return cached.value;
+  }
+
+  const sandboxCpu = Math.max(1, opts.sandboxCpu ?? 2);
+  const sandboxMemoryGb = Math.max(1, opts.sandboxMemoryGb ?? 4);
+  const sandboxDiskGb = Math.max(1, opts.sandboxDiskGb ?? 10);
+
+  const fallback = (): DaytonaOrgLimits => {
+    const val: DaytonaOrgLimits = {
+      orgId,
+      totalCpuQuota: 10,
+      totalMemoryQuotaGb: 10,
+      totalDiskQuotaGb: 30,
+      maxRunningSandboxes: Math.max(
+        1,
+        Math.floor(Math.min(10 / sandboxMemoryGb, 10 / sandboxCpu)),
+      ),
+      maxNonArchivedSandboxes: Math.max(1, Math.floor(30 / sandboxDiskGb)),
+      source: 'fallback',
+      fetchedAtMs: nowMs,
+    };
+    orgLimitsCache.set(orgId, { value: val, expiresAt: nowMs + ORG_LIMITS_FALLBACK_TTL_MS });
+    return val;
+  };
+
+  if (!apiKey || !orgId) return fallback();
+
+  try {
+    const res = await fetch(`${daytonaApiBase()}/organizations/${encodeURIComponent(orgId)}/usage`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(DAYTONA_REST_CALL_TIMEOUT_MS),
+    });
+    if (res.status === 401 || res.status === 403) {
+      const err = new Error(`Daytona organization usage unauthorized: HTTP ${res.status}`) as Error & {
+        status?: number;
+      };
+      err.status = res.status;
+      throw err;
+    }
+    if (!res.ok) return fallback();
+    const body = (await res.json()) as {
+      totalCpuQuota?: number;
+      totalMemoryQuota?: number;
+      totalDiskQuota?: number;
+      limits?: {
+        totalCpuQuota?: number;
+        totalMemoryQuota?: number;
+        totalDiskQuota?: number;
+      };
+    };
+    const totalCpuQuota = Number(body.totalCpuQuota ?? body.limits?.totalCpuQuota ?? 0);
+    const totalMemoryQuotaGb = Number(body.totalMemoryQuota ?? body.limits?.totalMemoryQuota ?? 0);
+    const totalDiskQuotaGb = Number(body.totalDiskQuota ?? body.limits?.totalDiskQuota ?? 0);
+    if (
+      !Number.isFinite(totalCpuQuota) ||
+      totalCpuQuota <= 0 ||
+      !Number.isFinite(totalMemoryQuotaGb) ||
+      totalMemoryQuotaGb <= 0 ||
+      !Number.isFinite(totalDiskQuotaGb) ||
+      totalDiskQuotaGb <= 0
+    ) {
+      return fallback();
+    }
+    const maxRunningSandboxes = Math.max(
+      1,
+      Math.floor(Math.min(totalMemoryQuotaGb / sandboxMemoryGb, totalCpuQuota / sandboxCpu)),
+    );
+    const maxNonArchivedSandboxes = Math.max(1, Math.floor(totalDiskQuotaGb / sandboxDiskGb));
+    const value: DaytonaOrgLimits = {
+      orgId,
+      totalCpuQuota,
+      totalMemoryQuotaGb,
+      totalDiskQuotaGb,
+      maxRunningSandboxes,
+      maxNonArchivedSandboxes,
+      source: 'api',
+      fetchedAtMs: nowMs,
+    };
+    orgLimitsCache.set(orgId, { value, expiresAt: nowMs + ORG_LIMITS_CACHE_TTL_MS });
+    return value;
+  } catch (err) {
+    const status = (err as { status?: number })?.status;
+    if (status === 401 || status === 403) throw err;
+    return fallback();
+  }
+}

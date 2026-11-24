@@ -829,4 +829,35 @@ describe('bootstrapLegacyRuntime — dead daemon on a running box', () => {
     expect(calls.execs[1]![0]).toBe('bash');
     expect(calls.execs[1]!.join(' ')).not.toContain(LOOPBACK);
   });
+
+  test('non-root Daytona sandbox preflight "must run as root" records unsupported and skips future attempts without failing audit', async () => {
+    const calls: Calls = { patches: [], audits: [], execs: [] };
+    const deps = makeDeps(
+      {
+        health: [LEGACY_HEALTH, LEGACY_HEALTH],
+        exec: async (cmd) => {
+          calls.execs.push(cmd);
+          return {
+            exitCode: 1,
+            stdout: '{"ok":false,"stage":"preflight","error":"must run as root","token_rotated":false}\n',
+            stderr: '',
+          };
+        },
+      },
+      calls,
+    );
+    const first = await bootstrapLegacyRuntime(input(null, 'daytona'), deps);
+    expect(first.outcome).toBe('skipped-unsupported');
+    expect(calls.execs).toHaveLength(1);
+    expect(calls.audits.at(-1)?.outcome).toBe('success');
+    expect(calls.audits.at(-1)?.phase).toBe('unsupported');
+    const savedMetadata = calls.patches.at(-1)!;
+    expect((savedMetadata[LEGACY_BOOTSTRAP_METADATA_KEY] as { state: string }).state).toBe('unsupported');
+    expect(describeLegacyBootstrapRetry(savedMetadata, 42, 0).status).toBe('unsupported');
+
+    // Subsequent pass sees state='unsupported' and skips immediately with ZERO exec calls.
+    const second = await bootstrapLegacyRuntime(input(savedMetadata, 'daytona'), deps);
+    expect(second.outcome).toBe('skipped-unsupported');
+    expect(calls.execs).toHaveLength(1);
+  });
 });

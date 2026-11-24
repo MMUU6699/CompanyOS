@@ -544,7 +544,7 @@ export function parseScriptReport(result: SandboxExecResult): ScriptReport | nul
   return null;
 }
 
-export type LegacyBootstrapState = 'running' | 'converged' | 'staged' | 'failed';
+export type LegacyBootstrapState = 'running' | 'converged' | 'staged' | 'failed' | 'unsupported';
 
 export interface LegacyBootstrapRecord {
   state: LegacyBootstrapState;
@@ -783,6 +783,7 @@ export function bootstrapWouldSkip(
 ): boolean {
   if (recentCurrentCheck(readCheck(metadata), nowMs, currentManifestBuild, externalId)) return true;
   const record = readRecord(metadata);
+  if (record?.state === 'unsupported') return true;
   return record?.state === 'staged' && record.manifestBuild === currentManifestBuild;
 }
 
@@ -791,7 +792,7 @@ export function runtimeIdle(turnInFlight: boolean | null): boolean {
   return turnInFlight === false;
 }
 
-export type LegacyBootstrapRetryStatus = 'idle' | 'running' | 'staged' | 'cooldown' | 'exhausted';
+export type LegacyBootstrapRetryStatus = 'idle' | 'running' | 'staged' | 'cooldown' | 'exhausted' | 'unsupported';
 
 export interface LegacyBootstrapRetrySummary {
   /** `idle`: nothing recorded, or the record is settled and free to retry now.
@@ -833,6 +834,9 @@ export function describeLegacyBootstrapRetry(
   const attempts = sameBuild ? record.attempts : 0;
   if (record.state === 'running') {
     return { status: 'running', classification, attempts: record.attempts, lastAttemptAt: record.lastAttemptAt, lastError: null, nextRetryAt: null };
+  }
+  if (record.state === 'unsupported') {
+    return { status: 'unsupported', classification, attempts: record.attempts, lastAttemptAt: record.lastAttemptAt, lastError: record.error ?? null, nextRetryAt: null };
   }
   if (record.state === 'staged' && sameBuild) {
     return { status: 'staged', classification, attempts: record.attempts, lastAttemptAt: record.lastAttemptAt, lastError: null, nextRetryAt: null };
@@ -1131,6 +1135,11 @@ async function checkBootstrapBudget(
       return { result: { outcome: 'skipped-cooldown', classification } };
     }
   }
+  if (record && record.state === 'unsupported' && !input.force) {
+    const detail = record.error ?? 'non-root sandbox; legacy bootstrap requires root';
+    logSkip(deps, input, 'skipped-unsupported', detail);
+    return { result: { outcome: 'skipped-unsupported', detail, classification } };
+  }
   if (record && sameBuild && record.state === 'staged' && !deadDaemonOnRunningBox) {
     // Daytona: staged and waiting for the provider's next start. Nothing
     // to redo until a current daemon proves it or the build moves on. A box
@@ -1291,6 +1300,23 @@ async function settleBootstrapReport(
     );
   }
   if (!report.ok) {
+    // Non-root container images (e.g. per-user Daytona GHCR sandboxes running
+    // as UID 1000 `kortix`) cannot run the root-only legacy bootstrap script.
+    // Record `unsupported` once instead of retrying 3x per build and emitting
+    // repeated failure audit events.
+    if (
+      report.stage === 'preflight' &&
+      typeof report.error === 'string' &&
+      report.error.toLowerCase().includes('must run as root')
+    ) {
+      return finishBootstrap(
+        attempt,
+        'unsupported',
+        { error: 'preflight: must run as root' },
+        'skipped-unsupported',
+        'non-root sandbox; legacy bootstrap requires root',
+      );
+    }
     return finishBootstrap(
       attempt,
       'failed',

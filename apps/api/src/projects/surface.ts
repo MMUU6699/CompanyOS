@@ -279,3 +279,11 @@ export {
 // domain that counts or stops live sessions).
 export { settleLiveSessionsOfAccounts, transitionSandbox, transitionSession } from './session-lifecycle/status-transitions';
 export { ACTIVE_SESSION_STATUSES, PROVISIONING_SESSION_STATUSES } from './lib/session-status';
+
+// Daytona capacity & disk quota guards (consumed by platform/providers/daytona.ts).
+export {
+  ensureDaytonaCapacitySlot,
+  evictIdleRunningDaytonaSandboxes,
+  reclaimDaytonaDiskSlots,
+} from './compute-quota-guard';
+export { triggerEmergencyDiskArchiveSweep } from './disk-quota-guard';

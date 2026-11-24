@@ -74,6 +74,8 @@ export interface UserDaytonaContext {
   daytonaRegion: string;
   snapshotName: string | null;
   snapshotStatus: UserDaytonaSnapshotStatus;
+  maxRunningSandboxes?: number | null;
+  maxNonArchivedSandboxes?: number | null;
   client: Daytona;
 }
 
@@ -148,6 +150,47 @@ export function invalidateUserDaytonaCache(userId: string): void {
     }
   }
   userContextCache.delete(userId);
+}
+
+/**
+ * Best-effort persistence of learned per-org sandbox caps into
+ * `user_daytona_credentials` (populated after Daytona quota rejections so
+ * future passes size capacity accurately across replicas).
+ */
+export async function persistLearnedDaytonaOrgCap(
+  daytonaOrgId: string,
+  patch: { maxRunningSandboxes?: number; maxNonArchivedSandboxes?: number },
+): Promise<void> {
+  if (!hasDatabase || !daytonaOrgId) return;
+  const set: Record<string, unknown> = { updatedAt: new Date() };
+  if (typeof patch.maxRunningSandboxes === 'number' && patch.maxRunningSandboxes >= 1) {
+    set.maxRunningSandboxes = Math.floor(patch.maxRunningSandboxes);
+  }
+  if (typeof patch.maxNonArchivedSandboxes === 'number' && patch.maxNonArchivedSandboxes >= 1) {
+    set.maxNonArchivedSandboxes = Math.floor(patch.maxNonArchivedSandboxes);
+  }
+  if (Object.keys(set).length <= 1) return;
+  try {
+    await db
+      .update(userDaytonaCredentials)
+      .set(set)
+      .where(eq(userDaytonaCredentials.daytonaOrgId, daytonaOrgId));
+    for (const entry of userContextCache.values()) {
+      if (entry.value.daytonaOrgId === daytonaOrgId) {
+        if (typeof set.maxRunningSandboxes === 'number') {
+          entry.value.maxRunningSandboxes = set.maxRunningSandboxes;
+        }
+        if (typeof set.maxNonArchivedSandboxes === 'number') {
+          entry.value.maxNonArchivedSandboxes = set.maxNonArchivedSandboxes;
+        }
+      }
+    }
+  } catch (err) {
+    logger.debug('[daytona-onboarding] persistLearnedDaytonaOrgCap skipped', {
+      daytonaOrgId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 export function rememberExternalIdOwner(externalId: string, userId: string, orgId?: string): void {
@@ -1063,6 +1106,8 @@ export async function resolveUserDaytonaContext(
     daytonaRegion: row.daytonaRegion || config.DAYTONA_TARGET || 'eu',
     snapshotName: row.snapshotName ?? null,
     snapshotStatus: row.snapshotStatus,
+    maxRunningSandboxes: row.maxRunningSandboxes ?? null,
+    maxNonArchivedSandboxes: row.maxNonArchivedSandboxes ?? null,
     client,
   };
 
