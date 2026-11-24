@@ -3,7 +3,10 @@
 // and recovers stuck 'exchanging' flows whose replica died mid-exchange.
 
 import { logger } from '../../lib/logger';
-import { reapExpiredDaytonaConnectFlowsOnce } from '../../onboarding/daytona-service';
+import {
+  reapExpiredDaytonaConnectFlowsOnce,
+  retryDueDaytonaSnapshotsOnce,
+} from '../../onboarding/daytona-service';
 import { runWorkerTick } from '../../shared/audit-scope';
 import { leaderTimer } from '../../shared/leader-timer';
 
@@ -11,9 +14,19 @@ const TICK_MS = 5 * 60_000;
 
 const reaper = leaderTimer(async () => {
   try {
-    const result = await runWorkerTick('daytona-flow-reaper', reapExpiredDaytonaConnectFlowsOnce);
-    if (result && (result.expired > 0 || result.keysRevoked > 0 || result.recoveredExchanging > 0)) {
-      logger.info('[daytona-flow-reaper] swept expired onboarding flows', result);
+    const result = await runWorkerTick('daytona-flow-reaper', async () => {
+      const flows = await reapExpiredDaytonaConnectFlowsOnce();
+      const snapshots = await retryDueDaytonaSnapshotsOnce();
+      return { flows, snapshots };
+    });
+    if (
+      result &&
+      (result.flows.expired > 0 ||
+        result.flows.keysRevoked > 0 ||
+        result.flows.recoveredExchanging > 0 ||
+        result.snapshots.retried > 0)
+    ) {
+      logger.info('[daytona-flow-reaper] swept flows and retried due snapshots', result);
     }
   } catch (err) {
     logger.error('[daytona-flow-reaper] tick failed', {

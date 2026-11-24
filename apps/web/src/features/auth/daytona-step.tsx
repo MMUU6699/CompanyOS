@@ -58,6 +58,7 @@ import {
   readActiveDaytonaFlow,
   readPendingDaytonaClaim,
   readPendingManualDaytonaKey,
+  retryDaytonaSnapshot,
   sanitizeUiErrorMessage,
   saveManualDaytonaKey,
   startDaytonaConnect,
@@ -971,10 +972,10 @@ export function DaytonaOnboardingGate({ children }: { children?: React.ReactNode
     return <>{children}</>;
   }
 
-  // Non-blocking background snapshot preparation: let the user enter Chat/Home immediately
-  // while Daytona finishes pulling/activating their pinned GHCR image in the background.
-  // If the user sends a message early, `/start` streams inline image-preparation progress
-  // (`boot.image = { state: 'waiting_for_provider' }`) and launches automatically once active.
+  // Silent background snapshot preparation: never show an image-download
+  // progress screen or pill. The pull starts immediately at Daytona approval;
+  // if a user sends a message early, it is queued and delivered automatically
+  // as soon as the snapshot reaches active.
   if (
     !forcedReconnect &&
     status?.connected &&
@@ -983,24 +984,7 @@ export function DaytonaOnboardingGate({ children }: { children?: React.ReactNode
       status.snapshotStatus === 'pulling' ||
       status.snapshotStatus === 'inactive')
   ) {
-    const bannerText =
-      status.snapshotStatus === 'inactive' ? copy.bgActivating : copy.bgPreparing;
-    return (
-      <>
-        {children}
-        <div
-          dir={isRtl ? 'rtl' : 'ltr'}
-          role="status"
-          aria-live="polite"
-          className="pointer-events-none fixed inset-x-0 top-3 z-40 flex justify-center px-4"
-        >
-          <div className="bg-card/95 border-border text-foreground pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-full border px-3.5 py-1.5 text-xs shadow-sm backdrop-blur">
-            <Loading className="size-3.5 shrink-0" />
-            <span className="truncate font-medium">{bannerText}</span>
-          </div>
-        </div>
-      </>
-    );
+    return <>{children}</>;
   }
 
   // Connected error recovery: non-blocking compact top banner for transient failures;
@@ -1031,7 +1015,11 @@ export function DaytonaOnboardingGate({ children }: { children?: React.ReactNode
               <span className="font-medium">{presentation.title}</span>
               <button
                 type="button"
-                onClick={() => void statusQuery.refetch()}
+                onClick={() => {
+                  void retryDaytonaSnapshot()
+                    .then((next) => queryClient.setQueryData(DAYTONA_STATUS_QUERY_KEY, next))
+                    .catch(() => void statusQuery.refetch());
+                }}
                 className="text-foreground hover:text-muted-foreground inline-flex items-center gap-1 font-medium underline underline-offset-2 transition-colors"
               >
                 <ArrowClockwiseIcon className="size-3 shrink-0" />

@@ -17,10 +17,16 @@ export type DaytonaSnapshotStatus = 'pending' | 'pulling' | 'active' | 'inactive
 export type DaytonaOnboardingErrorCode =
   | 'DAYTONA_REGION_REQUIRED'
   | 'DAYTONA_EMAIL_UNVERIFIED'
+  | 'DAYTONA_ORG_SUSPENDED'
   | 'DAYTONA_QUOTA_EXCEEDED'
+  | 'DAYTONA_SNAPSHOT_BUILDING'
   | 'DAYTONA_SNAPSHOT_FAILED'
+  | 'DAYTONA_SNAPSHOT_CONFIG_INVALID'
   | 'DAYTONA_RECONNECT_REQUIRED'
-  | 'DAYTONA_TIMEOUT';
+  | 'DAYTONA_NOT_CONNECTED'
+  | 'DAYTONA_TIMEOUT'
+  | 'DAYTONA_TOO_MANY_FLOWS'
+  | 'DAYTONA_RATE_LIMITED';
 
 export interface StartDaytonaConnectResponse {
   flowId: string;
@@ -47,6 +53,9 @@ export interface DaytonaOnboardingStatus {
   snapshotErrorCode?: DaytonaOnboardingErrorCode | null;
   snapshotError: string | null;
   reconnectRequired?: boolean;
+  previousOrgId?: string | null;
+  orgSwitched?: boolean;
+  warning?: string | null;
 }
 
 export interface StoredActiveFlow extends StartDaytonaConnectResponse {
@@ -83,10 +92,16 @@ export function inferDaytonaErrorCode(
   if (
     code === 'DAYTONA_REGION_REQUIRED' ||
     code === 'DAYTONA_EMAIL_UNVERIFIED' ||
+    code === 'DAYTONA_ORG_SUSPENDED' ||
     code === 'DAYTONA_QUOTA_EXCEEDED' ||
+    code === 'DAYTONA_SNAPSHOT_BUILDING' ||
     code === 'DAYTONA_SNAPSHOT_FAILED' ||
+    code === 'DAYTONA_SNAPSHOT_CONFIG_INVALID' ||
     code === 'DAYTONA_RECONNECT_REQUIRED' ||
-    code === 'DAYTONA_TIMEOUT'
+    code === 'DAYTONA_NOT_CONNECTED' ||
+    code === 'DAYTONA_TIMEOUT' ||
+    code === 'DAYTONA_TOO_MANY_FLOWS' ||
+    code === 'DAYTONA_RATE_LIMITED'
   ) {
     return code;
   }
@@ -94,8 +109,11 @@ export function inferDaytonaErrorCode(
   if (lower.includes('default region') || lower.includes('defaultregion')) {
     return 'DAYTONA_REGION_REQUIRED';
   }
-  if (lower.includes('verify your email') || lower.includes('suspended')) {
+  if (lower.includes('verify your email') || lower.includes('email_access_denied')) {
     return 'DAYTONA_EMAIL_UNVERIFIED';
+  }
+  if (lower.includes('depleted credits') || lower.includes('suspended')) {
+    return 'DAYTONA_ORG_SUSPENDED';
   }
   if (
     lower.includes('reconnect') ||
@@ -223,6 +241,18 @@ export async function fetchDaytonaOnboardingStatus(): Promise<DaytonaOnboardingS
   });
   if (!res.ok) {
     throw new Error(await parseErrorMessage(res, 'Could not check your cloud computer status. Please retry.'));
+  }
+  return (await res.json()) as DaytonaOnboardingStatus;
+}
+
+export async function retryDaytonaSnapshot(): Promise<DaytonaOnboardingStatus> {
+  const headers = await authHeaders();
+  const res = await fetch(`${onboardingBaseUrl()}/retry`, {
+    method: 'POST',
+    headers,
+  });
+  if (!res.ok) {
+    throw new Error(await parseErrorMessage(res, 'Could not retry cloud computer image setup. Please try again.'));
   }
   return (await res.json()) as DaytonaOnboardingStatus;
 }

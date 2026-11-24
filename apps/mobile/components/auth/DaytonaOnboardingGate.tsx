@@ -48,6 +48,7 @@ import {
   inferDaytonaErrorCode,
   readPendingDaytonaClaim,
   readPendingManualDaytonaKey,
+  retryDaytonaSnapshot,
   sanitizeUiErrorMessage,
   saveManualDaytonaKey,
   subscribeDaytonaReconnect,
@@ -333,10 +334,9 @@ export function DaytonaOnboardingGate() {
     return null;
   }
 
-  // Non-blocking background snapshot preparation: allow immediate entry to Chat/Home
-  // while Daytona finishes pulling/activating the pinned GHCR image in the background.
-  // If the user sends early, `SessionConnecting` streams inline image progress
-  // (`boot.image = { state: 'waiting_for_provider' }`) and opens automatically once active.
+  // Silent background snapshot preparation: never render an image-download
+  // progress overlay. Pull starts at Daytona approval; any message sent early
+  // is queued and delivered automatically once the snapshot becomes active.
   if (
     !forcedReconnect &&
     status?.connected &&
@@ -345,39 +345,7 @@ export function DaytonaOnboardingGate() {
       status.snapshotStatus === 'pulling' ||
       status.snapshotStatus === 'inactive')
   ) {
-    const bannerText =
-      status.snapshotStatus === 'inactive' ? copy.bgActivating : copy.bgPreparing;
-    return (
-      <View
-        pointerEvents="box-none"
-        style={{
-          position: 'absolute',
-          top: insets.top + 8,
-          left: 16,
-          right: 16,
-          zIndex: 40,
-          alignItems: 'center',
-        }}>
-        <View
-          className="max-w-full flex-row items-center gap-2 rounded-full border border-border bg-card px-3.5 py-1.5"
-          style={{
-            flexDirection: isAr ? 'row-reverse' : 'row',
-            shadowColor: '#000',
-            shadowOpacity: 0.08,
-            shadowRadius: 8,
-            shadowOffset: { width: 0, height: 2 },
-            elevation: 3,
-          }}>
-          <KortixLoader size="small" />
-          <Text
-            variant="small"
-            numberOfLines={1}
-            className="flex-shrink font-roobert-medium text-foreground">
-            {bannerText}
-          </Text>
-        </View>
-      </View>
-    );
+    return null;
   }
 
   // Connected error recovery: non-blocking compact top banner for transient failures;
@@ -426,7 +394,9 @@ export function DaytonaOnboardingGate() {
               accessibilityRole="button"
               onPress={() => {
                 haptics.tap();
-                void statusQuery.refetch();
+                void retryDaytonaSnapshot()
+                  .then((next) => queryClient.setQueryData(DAYTONA_STATUS_QUERY_KEY, next))
+                  .catch(() => void statusQuery.refetch());
               }}
               className="flex-row items-center gap-1 px-1 py-0.5">
               <Icon as={ArrowClockwiseIcon} size={13} className="text-foreground" />

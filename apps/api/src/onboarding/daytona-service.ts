@@ -250,14 +250,33 @@ export async function getDaytonaWorkosOidcConfig(): Promise<DaytonaWorkosOidcCon
 
 // ─── GHCR Pinned Snapshot Reference & Lifecycle ─────────────────────────────
 
+export const MAX_SNAPSHOT_ATTEMPTS = 5;
+const SNAPSHOT_BACKOFF_BASE_MS = 15_000;
+const SNAPSHOT_BACKOFF_MAX_MS = 10 * 60_000;
+
+export function computeSnapshotRetryDelayMs(attempt: number): number {
+  const exp = Math.max(0, Math.min(attempt - 1, 10));
+  return Math.min(SNAPSHOT_BACKOFF_MAX_MS, SNAPSHOT_BACKOFF_BASE_MS * 2 ** exp);
+}
+
 export function getPinnedGhcrSandboxImage(): string | null {
   const raw = config.KORTIX_SANDBOX_GHCR_IMAGE?.trim();
   if (!raw) return null;
   if (raw.endsWith(':latest')) {
-    throw new Error('KORTIX_SANDBOX_GHCR_IMAGE must use an immutable pinned tag or digest, never :latest');
+    throw new DaytonaStructuredError(
+      'DAYTONA_SNAPSHOT_CONFIG_INVALID',
+      'KORTIX_SANDBOX_GHCR_IMAGE must use an immutable pinned tag or digest, never :latest.',
+      500,
+      false,
+    );
   }
   if (!raw.includes(':') && !raw.includes('@sha256:')) {
-    throw new Error('KORTIX_SANDBOX_GHCR_IMAGE must include an explicit tag or @sha256 digest');
+    throw new DaytonaStructuredError(
+      'DAYTONA_SNAPSHOT_CONFIG_INVALID',
+      'KORTIX_SANDBOX_GHCR_IMAGE must include an explicit tag or @sha256 digest.',
+      500,
+      false,
+    );
   }
   return raw;
 }
@@ -305,15 +324,24 @@ export interface EnsureUserSnapshotResult {
   reconnectRequired?: boolean;
 }
 
-async function updateUserSnapshotDbState(
+async function updateOrgSnapshotDbState(
+  daytonaOrgId: string | undefined,
   userId: string | undefined,
   patch: {
     snapshotName?: string;
     snapshotStatus: UserDaytonaSnapshotStatus;
     snapshotError?: string | null;
+    snapshotAttempts?: number;
+    snapshotNextRetryAt?: Date | null;
   },
 ): Promise<void> {
-  if (!userId || !hasDatabase) return;
+  if (!hasDatabase) return;
+  const whereClause = daytonaOrgId
+    ? eq(userDaytonaCredentials.daytonaOrgId, daytonaOrgId)
+    : userId
+      ? eq(userDaytonaCredentials.userId, userId)
+      : null;
+  if (!whereClause) return;
   try {
     await db
       .update(userDaytonaCredentials)
@@ -321,50 +349,213 @@ async function updateUserSnapshotDbState(
         ...(patch.snapshotName !== undefined ? { snapshotName: patch.snapshotName } : {}),
         snapshotStatus: patch.snapshotStatus,
         snapshotError: patch.snapshotError ?? null,
+        ...(patch.snapshotAttempts !== undefined ? { snapshotAttempts: patch.snapshotAttempts } : {}),
+        ...(patch.snapshotNextRetryAt !== undefined
+          ? { snapshotNextRetryAt: patch.snapshotNextRetryAt }
+          : {}),
         updatedAt: new Date(),
       })
-      .where(eq(userDaytonaCredentials.userId, userId));
-    const cached = userContextCache.get(userId);
-    if (cached) {
-      if (patch.snapshotName !== undefined) cached.value.snapshotName = patch.snapshotName;
-      cached.value.snapshotStatus = patch.snapshotStatus;
+      .where(whereClause);
+    for (const [uid, cached] of userContextCache.entries()) {
+      if ((daytonaOrgId && cached.value.daytonaOrgId === daytonaOrgId) || (userId && uid === userId)) {
+        if (patch.snapshotName !== undefined) cached.value.snapshotName = patch.snapshotName;
+        cached.value.snapshotStatus = patch.snapshotStatus;
+      }
     }
   } catch (err) {
-    console.warn(
-      '[daytona-onboarding] failed to update snapshot state in DB:',
-      err instanceof Error ? err.message : String(err),
-    );
+    logger.warn('[daytona-onboarding] failed to update snapshot state in DB', {
+      daytonaOrgId: daytonaOrgId ?? null,
+      userId: userId ?? null,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
+}
+
+async function updateUserSnapshotDbState(
+  userId: string | undefined,
+  patch: {
+    snapshotName?: string;
+    snapshotStatus: UserDaytonaSnapshotStatus;
+    snapshotError?: string | null;
+    snapshotAttempts?: number;
+    snapshotNextRetryAt?: Date | null;
+  },
+): Promise<void> {
+  await updateOrgSnapshotDbState(undefined, userId, patch);
+}
+
+/**
+ * Read-only observation of the pinned GHCR snapshot in a user's Daytona org.
+ * NEVER sends POST, DELETE, or PATCH to Daytona. Safe for `GET /status`.
+ */
+export async function inspectUserSnapshotReadOnly(opts: {
+  userId?: string;
+  apiKey: string;
+  daytonaOrgId: string;
+}): Promise<EnsureUserSnapshotResult> {
+  const imageRef = getPinnedGhcrSandboxImage();
+  if (!imageRef) {
+    return {
+      snapshotName: '',
+      snapshotStatus: 'failed',
+      snapshotErrorCode: 'DAYTONA_SNAPSHOT_CONFIG_INVALID',
+      snapshotError: HUMAN_ERROR_COPY.DAYTONA_SNAPSHOT_CONFIG_INVALID,
+      reconnectRequired: false,
+    };
+  }
+  const snapshotName = deriveSnapshotNameForImage(imageRef);
+  const flightKey = `${opts.daytonaOrgId}:${snapshotName}`;
+  const base = daytonaApiBaseUrl();
+
+  const getRes = await fetch(`${base}/snapshots/${encodeURIComponent(snapshotName)}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${opts.apiKey}`,
+      Accept: 'application/json',
+    },
+    signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
+  });
+
+  if (getRes.status === 401) {
+    if (opts.userId) invalidateUserDaytonaCache(opts.userId);
+    await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
+      snapshotName,
+      snapshotStatus: 'failed',
+      snapshotError: 'DAYTONA_RECONNECT_REQUIRED',
+    });
+    throw new DaytonaReconnectRequiredError();
+  }
+
+  if (getRes.status === 404) {
+    // Snapshot not yet created in Daytona; do NOT mutate from GET /status.
+    return {
+      snapshotName,
+      snapshotStatus: 'pending',
+      snapshotErrorCode: null,
+      snapshotError: null,
+      reconnectRequired: false,
+    };
+  }
+
+  if (!getRes.ok) {
+    const body = await getRes.text().catch(() => '');
+    const classified = classifyDaytonaError(getRes.status, body);
+    await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
+      snapshotName,
+      snapshotStatus: 'failed',
+      snapshotError: classified.code,
+    });
+    return {
+      snapshotName,
+      snapshotStatus: 'failed',
+      snapshotErrorCode: classified.code,
+      snapshotError: classified.message,
+      reconnectRequired: classified.reconnectRequired,
+    };
+  }
+
+  const snap = (await getRes.json()) as {
+    id: string;
+    name: string;
+    state?: string;
+    errorReason?: string;
+  };
+  const mapped = mapDaytonaSnapshotState(snap.state);
+
+  if (mapped === 'active') {
+    verifiedActiveSnapshotCache.set(flightKey, Date.now());
+    await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
+      snapshotName,
+      snapshotStatus: 'active',
+      snapshotError: null,
+      snapshotAttempts: 0,
+      snapshotNextRetryAt: null,
+    });
+    return {
+      snapshotName,
+      snapshotStatus: 'active',
+      snapshotErrorCode: null,
+      snapshotError: null,
+      reconnectRequired: false,
+    };
+  }
+
+  if (mapped === 'failed') {
+    const classified = classifyDaytonaError(0, snap.errorReason || 'DAYTONA_SNAPSHOT_FAILED');
+    await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
+      snapshotName,
+      snapshotStatus: 'failed',
+      snapshotError: classified.code,
+    });
+    return {
+      snapshotName,
+      snapshotStatus: 'failed',
+      snapshotErrorCode: classified.code,
+      snapshotError: classified.message,
+      reconnectRequired: classified.reconnectRequired,
+    };
+  }
+
+  await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
+    snapshotName,
+    snapshotStatus: mapped,
+    snapshotError: null,
+  });
+  return {
+    snapshotName,
+    snapshotStatus: mapped,
+    snapshotErrorCode: null,
+    snapshotError: null,
+    reconnectRequired: false,
+  };
 }
 
 /**
  * Ensure the pinned GHCR Kortix sandbox snapshot exists and is active/pulling
- * inside a user's own Daytona organization. Single-flight per `daytonaOrgId`.
+ * inside a user's own Daytona organization.
+ *
+ * Single-flight per `daytonaOrgId:snapshotName`; persists DB state to ALL users
+ * in `daytonaOrgId` regardless of who started the flight. Bounded by
+ * `MAX_SNAPSHOT_ATTEMPTS` with exponential backoff — never loops delete+recreate.
  */
 export function ensureUserSnapshot(opts: {
   userId?: string;
   apiKey: string;
   daytonaOrgId: string;
   daytonaRegion: string;
+  allowDeleteErrored?: boolean;
+  resetAttempts?: boolean;
 }): Promise<EnsureUserSnapshotResult> {
   const imageRef = getPinnedGhcrSandboxImage();
   if (!imageRef) {
-    void updateUserSnapshotDbState(opts.userId, {
+    void updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
       snapshotStatus: 'failed',
-      snapshotError: 'DAYTONA_SNAPSHOT_FAILED',
+      snapshotError: 'DAYTONA_SNAPSHOT_CONFIG_INVALID',
     });
     return Promise.resolve({
       snapshotName: '',
       snapshotStatus: 'failed',
-      snapshotErrorCode: 'DAYTONA_SNAPSHOT_FAILED',
-      snapshotError: HUMAN_ERROR_COPY.DAYTONA_SNAPSHOT_FAILED,
+      snapshotErrorCode: 'DAYTONA_SNAPSHOT_CONFIG_INVALID',
+      snapshotError: HUMAN_ERROR_COPY.DAYTONA_SNAPSHOT_CONFIG_INVALID,
       reconnectRequired: false,
     });
   }
   const snapshotName = deriveSnapshotNameForImage(imageRef);
   const flightKey = `${opts.daytonaOrgId}:${snapshotName}`;
   const existingFlight = ensureSnapshotInFlight.get(flightKey);
-  if (existingFlight) return existingFlight;
+  if (existingFlight) {
+    // Ensure a late joiner's user row stays consistent once the shared flight settles.
+    return existingFlight.then(async (res) => {
+      if (opts.userId) {
+        await updateUserSnapshotDbState(opts.userId, {
+          snapshotName: res.snapshotName || snapshotName,
+          snapshotStatus: res.snapshotStatus,
+          snapshotError: res.snapshotErrorCode,
+        });
+      }
+      return res;
+    });
+  }
 
   const task = (async (): Promise<EnsureUserSnapshotResult> => {
     const base = daytonaApiBaseUrl();
@@ -373,15 +564,61 @@ export function ensureUserSnapshot(opts: {
       Accept: 'application/json',
     };
 
+    // Load current retry budget from DB (if available) to enforce bounded retries + backoff.
+    let currentAttempts = 0;
+    let nextRetryAt: Date | null = null;
+    if (hasDatabase && !opts.resetAttempts) {
+      try {
+        const credRows = await db
+          .select({
+            snapshotAttempts: userDaytonaCredentials.snapshotAttempts,
+            snapshotNextRetryAt: userDaytonaCredentials.snapshotNextRetryAt,
+          })
+          .from(userDaytonaCredentials)
+          .where(eq(userDaytonaCredentials.daytonaOrgId, opts.daytonaOrgId))
+          .limit(1);
+        if (credRows[0]) {
+          currentAttempts = credRows[0].snapshotAttempts ?? 0;
+          nextRetryAt = credRows[0].snapshotNextRetryAt ?? null;
+        }
+      } catch {
+        // Non-fatal: proceed with attempt 0.
+      }
+    }
+
+    const recordFailure = async (
+      classified: ClassifiedDaytonaError,
+    ): Promise<EnsureUserSnapshotResult> => {
+      const nextAttempt = currentAttempts + 1;
+      const retryAt =
+        classified.retriable && nextAttempt < MAX_SNAPSHOT_ATTEMPTS
+          ? new Date(Date.now() + computeSnapshotRetryDelayMs(nextAttempt))
+          : null;
+      await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
+        snapshotName,
+        snapshotStatus: 'failed',
+        snapshotError: classified.code,
+        snapshotAttempts: nextAttempt,
+        snapshotNextRetryAt: retryAt,
+      });
+      return {
+        snapshotName,
+        snapshotStatus: 'failed',
+        snapshotErrorCode: classified.code,
+        snapshotError: classified.message,
+        reconnectRequired: classified.reconnectRequired,
+      };
+    };
+
     try {
       const getRes = await fetch(`${base}/snapshots/${encodeURIComponent(snapshotName)}`, {
         headers: authHeaders,
         signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
       });
 
-      if (isDaytonaCredentialRejectedStatus(getRes.status)) {
+      if (getRes.status === 401) {
         if (opts.userId) invalidateUserDaytonaCache(opts.userId);
-        await updateUserSnapshotDbState(opts.userId, {
+        await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
           snapshotName,
           snapshotStatus: 'failed',
           snapshotError: 'DAYTONA_RECONNECT_REQUIRED',
@@ -400,10 +637,12 @@ export function ensureUserSnapshot(opts: {
 
         if (mapped === 'active') {
           verifiedActiveSnapshotCache.set(flightKey, Date.now());
-          await updateUserSnapshotDbState(opts.userId, {
+          await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
             snapshotName,
             snapshotStatus: 'active',
             snapshotError: null,
+            snapshotAttempts: 0,
+            snapshotNextRetryAt: null,
           });
           return {
             snapshotName,
@@ -416,20 +655,22 @@ export function ensureUserSnapshot(opts: {
 
         if (mapped === 'inactive') {
           verifiedActiveSnapshotCache.delete(flightKey);
-          console.log(
-            `[daytona-onboarding] activating inactive snapshot ${snapshotName} (${snap.id}) in org ${opts.daytonaOrgId}`,
-          );
+          logger.info('[daytona-onboarding] activating inactive snapshot', {
+            snapshotName,
+            snapshotId: snap.id,
+            orgId: opts.daytonaOrgId,
+          });
           const actRes = await fetch(`${base}/snapshots/${encodeURIComponent(snap.id)}/activate`, {
             method: 'POST',
             headers: authHeaders,
             signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
           });
-          if (isDaytonaCredentialRejectedStatus(actRes.status)) {
+          if (actRes.status === 401) {
             if (opts.userId) invalidateUserDaytonaCache(opts.userId);
             throw new DaytonaReconnectRequiredError();
           }
           if (actRes.ok) {
-            await updateUserSnapshotDbState(opts.userId, {
+            await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
               snapshotName,
               snapshotStatus: 'pulling',
               snapshotError: null,
@@ -443,26 +684,16 @@ export function ensureUserSnapshot(opts: {
             };
           }
           const actErr = await actRes.text().catch(() => '');
-          console.warn(
-            `[daytona-onboarding] activate snapshot failed (HTTP ${actRes.status}): ${actErr.slice(0, 300)}`,
-          );
-          const classified = classifyDaytonaError(actRes.status, actErr);
-          await updateUserSnapshotDbState(opts.userId, {
-            snapshotName,
-            snapshotStatus: 'failed',
-            snapshotError: classified.code,
+          logger.warn('[daytona-onboarding] activate snapshot failed', {
+            orgId: opts.daytonaOrgId,
+            status: actRes.status,
+            body: actErr.slice(0, 300),
           });
-          return {
-            snapshotName,
-            snapshotStatus: 'failed',
-            snapshotErrorCode: classified.code,
-            snapshotError: classified.message,
-            reconnectRequired: classified.reconnectRequired,
-          };
+          return recordFailure(classifyDaytonaError(actRes.status, actErr));
         }
 
         if (mapped === 'pending' || mapped === 'pulling') {
-          await updateUserSnapshotDbState(opts.userId, {
+          await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
             snapshotName,
             snapshotStatus: mapped,
             snapshotError: null,
@@ -476,10 +707,23 @@ export function ensureUserSnapshot(opts: {
           };
         }
 
-        // Previous snapshot errored: delete it cleanly and recreate once below.
-        console.warn(
-          `[daytona-onboarding] deleting errored snapshot ${snapshotName} (${snap.id}, reason=${snap.errorReason ?? 'unknown'}) in org ${opts.daytonaOrgId}`,
-        );
+        // Previous snapshot errored: NEVER delete+recreate in a loop!
+        // Only delete and recreate when explicitly permitted AND within retry budget/backoff.
+        const classifiedErr = classifyDaytonaError(0, snap.errorReason || 'DAYTONA_SNAPSHOT_FAILED');
+        const withinBudget = opts.resetAttempts || currentAttempts < MAX_SNAPSHOT_ATTEMPTS;
+        const pastBackoff = opts.resetAttempts || !nextRetryAt || nextRetryAt.getTime() <= Date.now();
+        if (!opts.allowDeleteErrored || !withinBudget || !pastBackoff) {
+          return recordFailure(classifiedErr);
+        }
+
+        logger.warn('[daytona-onboarding] deleting errored snapshot for bounded retry', {
+          snapshotName,
+          snapshotId: snap.id,
+          orgId: opts.daytonaOrgId,
+          attempt: currentAttempts + 1,
+          maxAttempts: MAX_SNAPSHOT_ATTEMPTS,
+          reason: snap.errorReason ?? 'unknown',
+        });
         await fetch(`${base}/snapshots/${encodeURIComponent(snap.id)}`, {
           method: 'DELETE',
           headers: authHeaders,
@@ -487,22 +731,25 @@ export function ensureUserSnapshot(opts: {
         }).catch(() => {});
       } else if (getRes.status !== 404) {
         const body = await getRes.text().catch(() => '');
-        console.warn(
-          `[daytona-onboarding] snapshot lookup failed (HTTP ${getRes.status}): ${body.slice(0, 300)}`,
-        );
-        const classified = classifyDaytonaError(getRes.status, body);
-        await updateUserSnapshotDbState(opts.userId, {
-          snapshotName,
-          snapshotStatus: 'failed',
-          snapshotError: classified.code,
+        logger.warn('[daytona-onboarding] snapshot lookup failed', {
+          orgId: opts.daytonaOrgId,
+          status: getRes.status,
+          body: body.slice(0, 300),
         });
-        return {
-          snapshotName,
-          snapshotStatus: 'failed',
-          snapshotErrorCode: classified.code,
-          snapshotError: classified.message,
-          reconnectRequired: classified.reconnectRequired,
-        };
+        return recordFailure(classifyDaytonaError(getRes.status, body));
+      } else {
+        // Snapshot 404 (not yet created): respect attempt budget/backoff on repeated failures.
+        const withinBudget = opts.resetAttempts || currentAttempts < MAX_SNAPSHOT_ATTEMPTS;
+        const pastBackoff = opts.resetAttempts || !nextRetryAt || nextRetryAt.getTime() <= Date.now();
+        if (!withinBudget || !pastBackoff) {
+          return {
+            snapshotName,
+            snapshotStatus: 'failed',
+            snapshotErrorCode: 'DAYTONA_SNAPSHOT_FAILED',
+            snapshotError: HUMAN_ERROR_COPY.DAYTONA_SNAPSHOT_FAILED,
+            reconnectRequired: false,
+          };
+        }
       }
 
       const targetRegion = opts.daytonaRegion || config.DAYTONA_TARGET || 'eu';
@@ -528,10 +775,13 @@ export function ensureUserSnapshot(opts: {
           signal: AbortSignal.timeout(DAYTONA_SNAPSHOT_CREATE_TIMEOUT_MS),
         });
 
-      // Create snapshot in the user's Daytona org from the public pinned GHCR image.
-      console.log(
-        `[daytona-onboarding] creating snapshot ${snapshotName} from ${imageRef} in org ${opts.daytonaOrgId} (region=${targetRegion}, timeout=${DAYTONA_SNAPSHOT_CREATE_TIMEOUT_MS}ms)`,
-      );
+      logger.info('[daytona-onboarding] creating snapshot from pinned GHCR image', {
+        snapshotName,
+        imageRef,
+        orgId: opts.daytonaOrgId,
+        region: targetRegion,
+        attempt: currentAttempts + 1,
+      });
       let createRes: Response;
       try {
         createRes = await postCreateSnapshot();
@@ -540,14 +790,12 @@ export function ensureUserSnapshot(opts: {
           createErr,
           createErr instanceof Error ? createErr.message : String(createErr),
         );
-        // Daytona may accept POST /snapshots asynchronously while the HTTP response
-        // times out during initial manifest fetch. Treat timeouts as pulling so
-        // /status continues polling cleanly for up to 8 minutes instead of falsely failing.
         if (createClassified.code === 'DAYTONA_TIMEOUT') {
-          console.warn(
-            `[daytona-onboarding] POST /snapshots timed out for ${snapshotName} in org ${opts.daytonaOrgId}; treating as pulling`,
-          );
-          await updateUserSnapshotDbState(opts.userId, {
+          logger.warn('[daytona-onboarding] POST /snapshots timed out; treating as pulling', {
+            snapshotName,
+            orgId: opts.daytonaOrgId,
+          });
+          await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
             snapshotName,
             snapshotStatus: 'pulling',
             snapshotError: null,
@@ -563,16 +811,18 @@ export function ensureUserSnapshot(opts: {
         throw createErr;
       }
 
-      if (isDaytonaCredentialRejectedStatus(createRes.status)) {
+      if (createRes.status === 401) {
         if (opts.userId) invalidateUserDaytonaCache(opts.userId);
         throw new DaytonaReconnectRequiredError();
       }
 
       if (createRes.ok || createRes.status === 409) {
-        await updateUserSnapshotDbState(opts.userId, {
+        await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
           snapshotName,
           snapshotStatus: 'pulling',
           snapshotError: null,
+          snapshotAttempts: opts.resetAttempts ? 0 : currentAttempts + 1,
+          snapshotNextRetryAt: null,
         });
         return {
           snapshotName,
@@ -584,13 +834,14 @@ export function ensureUserSnapshot(opts: {
       }
 
       let errText = await createRes.text().catch(() => '');
-      console.warn(
-        `[daytona-onboarding] POST /snapshots failed (HTTP ${createRes.status}): ${errText.slice(0, 300)}`,
-      );
+      logger.warn('[daytona-onboarding] POST /snapshots failed', {
+        orgId: opts.daytonaOrgId,
+        status: createRes.status,
+        body: errText.slice(0, 300),
+      });
       let classified = classifyDaytonaError(createRes.status, errText);
 
       // Self-heal for orgs connected before PATCH /default-region shipped:
-      // attempt PATCH /organizations/:orgId/default-region with API key once, then retry POST /snapshots.
       if (classified.code === 'DAYTONA_REGION_REQUIRED' && opts.daytonaOrgId) {
         try {
           const regionToSet = await resolvePreferredSharedRegion(targetRegion);
@@ -608,12 +859,9 @@ export function ensureUserSnapshot(opts: {
             },
           );
           if (patchRes.ok) {
-            console.log(
-              `[daytona-onboarding] self-healed defaultRegionId=${regionToSet} via PATCH for org ${opts.daytonaOrgId}; retrying POST /snapshots`,
-            );
             createRes = await postCreateSnapshot();
             if (createRes.ok || createRes.status === 409) {
-              await updateUserSnapshotDbState(opts.userId, {
+              await updateOrgSnapshotDbState(opts.daytonaOrgId, opts.userId, {
                 snapshotName,
                 snapshotStatus: 'pulling',
                 snapshotError: null,
@@ -628,48 +876,24 @@ export function ensureUserSnapshot(opts: {
             }
             errText = await createRes.text().catch(() => '');
             classified = classifyDaytonaError(createRes.status, errText);
-          } else {
-            console.warn(
-              `[daytona-onboarding] API-key PATCH default-region returned HTTP ${patchRes.status}; reconnect required so user JWT can set defaultRegionId`,
-            );
           }
         } catch (patchErr) {
-          console.warn(
-            '[daytona-onboarding] self-heal PATCH default-region threw:',
-            patchErr instanceof Error ? patchErr.message : String(patchErr),
-          );
+          logger.warn('[daytona-onboarding] self-heal PATCH default-region threw', {
+            orgId: opts.daytonaOrgId,
+            error: patchErr instanceof Error ? patchErr.message : String(patchErr),
+          });
         }
       }
 
-      await updateUserSnapshotDbState(opts.userId, {
-        snapshotName,
-        snapshotStatus: 'failed',
-        snapshotError: classified.code,
-      });
-      return {
-        snapshotName,
-        snapshotStatus: 'failed',
-        snapshotErrorCode: classified.code,
-        snapshotError: classified.message,
-        reconnectRequired: classified.reconnectRequired,
-      };
+      return recordFailure(classified);
     } catch (err) {
       if (isDaytonaReconnectRequiredError(err)) throw err;
       const rawMsg = err instanceof Error ? err.message : String(err);
-      console.warn('[daytona-onboarding] ensureUserSnapshot exception:', rawMsg);
-      const classified = classifyDaytonaError(err, rawMsg);
-      await updateUserSnapshotDbState(opts.userId, {
-        snapshotName,
-        snapshotStatus: 'failed',
-        snapshotError: classified.code,
+      logger.warn('[daytona-onboarding] ensureUserSnapshot exception', {
+        orgId: opts.daytonaOrgId,
+        error: rawMsg,
       });
-      return {
-        snapshotName,
-        snapshotStatus: 'failed',
-        snapshotErrorCode: classified.code,
-        snapshotError: classified.message,
-        reconnectRequired: classified.reconnectRequired,
-      };
+      return recordFailure(classifyDaytonaError(err, rawMsg));
     }
   })().finally(() => {
     ensureSnapshotInFlight.delete(flightKey);
@@ -691,7 +915,12 @@ export async function ensureUserSnapshotActive(
 ): Promise<{ snapshotName: string }> {
   const imageRef = getPinnedGhcrSandboxImage();
   if (!imageRef) {
-    throw new Error('KORTIX_SANDBOX_GHCR_IMAGE is not configured');
+    throw new DaytonaStructuredError(
+      'DAYTONA_SNAPSHOT_CONFIG_INVALID',
+      'KORTIX_SANDBOX_GHCR_IMAGE is not configured.',
+      500,
+      false,
+    );
   }
   const expectedName = deriveSnapshotNameForImage(imageRef);
   const cacheKey = `${ctx.daytonaOrgId}:${expectedName}`;
@@ -732,11 +961,10 @@ export async function ensureUserSnapshotActive(
       );
     }
     await new Promise((r) => setTimeout(r, 2_500));
-    last = await ensureUserSnapshot({
+    last = await inspectUserSnapshotReadOnly({
       userId: ctx.userId,
       apiKey: ctx.apiKey,
       daytonaOrgId: ctx.daytonaOrgId,
-      daytonaRegion: ctx.daytonaRegion,
     });
   }
 
@@ -2065,6 +2293,13 @@ export async function claimDaytonaConnect(
   };
 }
 
+/**
+ * Read-only Daytona onboarding status (`GET /v1/onboarding/daytona/status`).
+ *
+ * Strictly read-only against Daytona: NEVER calls POST /snapshots,
+ * DELETE /snapshots, POST /activate, or PATCH /default-region. Use
+ * `POST /v1/onboarding/daytona/retry` or the bounded worker job to mutate/retry.
+ */
 export async function getDaytonaOnboardingStatus(
   userId: string,
 ): Promise<DaytonaOnboardingStatusResult> {
@@ -2078,6 +2313,7 @@ export async function getDaytonaOnboardingStatus(
       snapshotErrorCode: null,
       snapshotError: null,
       reconnectRequired: false,
+      previousOrgId: null,
     };
   }
   const rows = await db
@@ -2096,29 +2332,44 @@ export async function getDaytonaOnboardingStatus(
       snapshotErrorCode: null,
       snapshotError: null,
       reconnectRequired: false,
+      previousOrgId: null,
     };
   }
 
-  const pinnedImg = getPinnedGhcrSandboxImage();
-  const expectedSnapshotName = pinnedImg ? deriveSnapshotNameForImage(pinnedImg) : null;
-  const needsLiveRefresh =
+  let expectedSnapshotName: string | null = null;
+  try {
+    const pinnedImg = getPinnedGhcrSandboxImage();
+    expectedSnapshotName = pinnedImg ? deriveSnapshotNameForImage(pinnedImg) : null;
+  } catch (cfgErr) {
+    const classified = classifyDaytonaError(cfgErr);
+    return {
+      connected: true,
+      orgId: row.daytonaOrgId,
+      region: row.daytonaRegion,
+      snapshotName: row.snapshotName,
+      snapshotStatus: 'failed',
+      snapshotErrorCode: classified.code,
+      snapshotError: classified.message,
+      reconnectRequired: false,
+      previousOrgId: row.previousDaytonaOrgId ?? null,
+    };
+  }
+
+  // Only poll read-only GET /snapshots/:name while snapshot is actively transitioning.
+  const shouldObserveReadOnly =
     row.snapshotStatus === 'pending' ||
     row.snapshotStatus === 'pulling' ||
-    row.snapshotStatus === 'inactive' ||
-    row.snapshotStatus === 'failed' ||
     (expectedSnapshotName !== null && row.snapshotName !== expectedSnapshotName);
 
-  if (needsLiveRefresh) {
+  if (shouldObserveReadOnly) {
     try {
       const ctx = await getUserDaytonaContext(userId);
       if (ctx) {
-        const snap = await ensureUserSnapshot({
+        const snap = await inspectUserSnapshotReadOnly({
           userId,
           apiKey: ctx.apiKey,
           daytonaOrgId: ctx.daytonaOrgId,
-          daytonaRegion: ctx.daytonaRegion,
         });
-        // Keep returning 'pulling' during a cold 6 GB pull if a single status check hits a transient timeout.
         const pullAgeMs = row.createdAt ? Date.now() - row.createdAt.getTime() : 0;
         if (
           snap.snapshotStatus === 'failed' &&
@@ -2135,6 +2386,7 @@ export async function getDaytonaOnboardingStatus(
             snapshotErrorCode: null,
             snapshotError: null,
             reconnectRequired: false,
+            previousOrgId: row.previousDaytonaOrgId ?? null,
           };
         }
         return {
@@ -2146,6 +2398,7 @@ export async function getDaytonaOnboardingStatus(
           snapshotErrorCode: snap.snapshotErrorCode,
           snapshotError: snap.snapshotError,
           reconnectRequired: Boolean(snap.reconnectRequired),
+          previousOrgId: row.previousDaytonaOrgId ?? null,
         };
       }
     } catch (err) {
@@ -2159,6 +2412,7 @@ export async function getDaytonaOnboardingStatus(
           snapshotErrorCode: 'DAYTONA_RECONNECT_REQUIRED',
           snapshotError: HUMAN_ERROR_COPY.DAYTONA_RECONNECT_REQUIRED,
           reconnectRequired: true,
+          previousOrgId: row.previousDaytonaOrgId ?? null,
         };
       }
     }
@@ -2174,7 +2428,121 @@ export async function getDaytonaOnboardingStatus(
     snapshotErrorCode: sanitized?.code ?? null,
     snapshotError: sanitized?.message ?? null,
     reconnectRequired: Boolean(sanitized?.reconnectRequired),
+    previousOrgId: row.previousDaytonaOrgId ?? null,
   };
+}
+
+/**
+ * Explicit user-triggered snapshot create/activate/retry (`POST /v1/onboarding/daytona/retry`).
+ * Resets the automatic retry counter and triggers one bounded create/activate attempt.
+ */
+export async function retryUserDaytonaSnapshot(
+  userId: string,
+): Promise<DaytonaOnboardingStatusResult> {
+  const resolution = await resolveUserDaytonaContext(userId);
+  if (resolution.kind === 'not_connected') {
+    throw new DaytonaNotConnectedError();
+  }
+  if (resolution.kind === 'reconnect_required') {
+    throw new DaytonaReconnectRequiredError(resolution.message);
+  }
+  if (resolution.kind === 'error') {
+    throw resolution.cause instanceof Error
+      ? resolution.cause
+      : new Error(resolution.message);
+  }
+
+  const { ctx } = resolution;
+  const snap = await ensureUserSnapshot({
+    userId: ctx.userId,
+    apiKey: ctx.apiKey,
+    daytonaOrgId: ctx.daytonaOrgId,
+    daytonaRegion: ctx.daytonaRegion,
+    allowDeleteErrored: true,
+    resetAttempts: true,
+  });
+
+  return {
+    connected: true,
+    orgId: ctx.daytonaOrgId,
+    region: ctx.daytonaRegion,
+    snapshotName: snap.snapshotName || ctx.snapshotName,
+    snapshotStatus: snap.snapshotStatus,
+    snapshotErrorCode: snap.snapshotErrorCode,
+    snapshotError: snap.snapshotError,
+    reconnectRequired: Boolean(snap.reconnectRequired),
+  };
+}
+
+const NON_RETRIABLE_SNAPSHOT_ERRORS = new Set<string>([
+  'DAYTONA_RECONNECT_REQUIRED',
+  'DAYTONA_ORG_SUSPENDED',
+  'DAYTONA_EMAIL_UNVERIFIED',
+  'DAYTONA_REGION_REQUIRED',
+  'DAYTONA_SNAPSHOT_CONFIG_INVALID',
+]);
+
+/**
+ * Bounded leader-only background worker retry for due failed/pending/inactive
+ * user snapshots (respects MAX_SNAPSHOT_ATTEMPTS and exponential backoff).
+ */
+export async function retryDueDaytonaSnapshotsOnce(): Promise<{
+  checked: number;
+  retried: number;
+  activated: number;
+}> {
+  if (!hasDatabase) return { checked: 0, retried: 0, activated: 0 };
+  let imageRef: string | null = null;
+  try {
+    imageRef = getPinnedGhcrSandboxImage();
+  } catch {
+    return { checked: 0, retried: 0, activated: 0 };
+  }
+  if (!imageRef) return { checked: 0, retried: 0, activated: 0 };
+
+  const now = new Date();
+  const rows = await db
+    .select()
+    .from(userDaytonaCredentials)
+    .where(
+      and(
+        inArray(userDaytonaCredentials.snapshotStatus, ['pending', 'failed', 'inactive']),
+        or(
+          sql`${userDaytonaCredentials.snapshotAttempts} IS NULL`,
+          lt(userDaytonaCredentials.snapshotAttempts, MAX_SNAPSHOT_ATTEMPTS),
+        ),
+        or(
+          sql`${userDaytonaCredentials.snapshotNextRetryAt} IS NULL`,
+          lt(userDaytonaCredentials.snapshotNextRetryAt, now),
+        ),
+      ),
+    )
+    .limit(10);
+
+  let retried = 0;
+  let activated = 0;
+  const seenOrgs = new Set<string>();
+  for (const row of rows) {
+    if (seenOrgs.has(row.daytonaOrgId)) continue;
+    if (row.snapshotError && NON_RETRIABLE_SNAPSHOT_ERRORS.has(row.snapshotError)) continue;
+    seenOrgs.add(row.daytonaOrgId);
+    const resolved = await resolveUserDaytonaContext(row.userId);
+    if (resolved.kind !== 'user') continue;
+    try {
+      const res = await ensureUserSnapshot({
+        userId: resolved.ctx.userId,
+        apiKey: resolved.ctx.apiKey,
+        daytonaOrgId: resolved.ctx.daytonaOrgId,
+        daytonaRegion: resolved.ctx.daytonaRegion,
+        allowDeleteErrored: true,
+      });
+      retried += 1;
+      if (res.snapshotStatus === 'active') activated += 1;
+    } catch {
+      // Errors are persisted on the row by ensureUserSnapshot.
+    }
+  }
+  return { checked: rows.length, retried, activated };
 }
 
 export async function saveManualDaytonaKey(

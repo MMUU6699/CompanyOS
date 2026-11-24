@@ -14,6 +14,7 @@ import {
   isDaytonaNotConnectedError,
   isDaytonaReconnectRequiredError,
   pollDaytonaConnect,
+  retryUserDaytonaSnapshot,
   saveManualDaytonaKey,
   startDaytonaConnect,
 } from './daytona-service';
@@ -215,7 +216,7 @@ daytonaOnboardingApp.post('/claim', supabaseAuth, async (c) => {
   }
 });
 
-// Authenticated live status check (also refreshes pulling/inactive/failed snapshot state).
+// Authenticated read-only status check (never mutates Daytona).
 daytonaOnboardingApp.get('/status', supabaseAuth, async (c) => {
   const userId = c.get('userId') as string | undefined;
   if (!userId) {
@@ -226,6 +227,21 @@ daytonaOnboardingApp.get('/status', supabaseAuth, async (c) => {
     return c.json(result, 200);
   } catch (err) {
     const formatted = formatRouteError(err, 'daytona_status_failed', 502);
+    return c.json(formatted.body, formatted.status);
+  }
+});
+
+// Authenticated explicit snapshot create/activate/retry endpoint.
+daytonaOnboardingApp.post('/retry', supabaseAuth, async (c) => {
+  const userId = c.get('userId') as string | undefined;
+  if (!userId) {
+    return c.json({ error: 'unauthorized', message: 'Authentication required' }, 401);
+  }
+  try {
+    const result = await retryUserDaytonaSnapshot(userId);
+    return c.json(result, 200);
+  } catch (err) {
+    const formatted = formatRouteError(err, 'daytona_snapshot_retry_failed', 502);
     return c.json(formatted.body, formatted.status);
   }
 });
