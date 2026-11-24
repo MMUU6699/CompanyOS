@@ -1,3 +1,8 @@
+import {
+  classifyDaytonaRuntimeError,
+  isNonRetriableDaytonaCode,
+} from '../../shared/daytona-errors';
+
 /**
  * A provider can continue to report `stopped` while start() is still changing
  * the VM state. Reconciliation must not convert that transitional observation
@@ -322,6 +327,23 @@ export function stampedRuntimeFailureState(
   if (ageMs >= RUNTIME_START_FAILURE_TTL_MS) return 'retry';
   // Clock skew ahead of us is not permission to hammer the provider.
   if (ageMs < 0) return 'cooling_down';
+  // Non-retriable provider error (e.g. suspended Daytona org / depleted credits,
+  // revoked API key, missing region, invalid snapshot): surface immediately as
+  // terminal instead of hiding behind a 2m/5m/10m `cooling_down` "Waking..." loop.
+  if (
+    metadata.runtimeWakeRetriable === false ||
+    isNonRetriableDaytonaCode(metadata.runtimeWakeErrorCode)
+  ) {
+    return 'terminal';
+  }
+  if (
+    typeof metadata.runtimeWakeErrorCode !== 'string' &&
+    typeof metadata.lastInitError === 'string' &&
+    metadata.lastInitError.length > 0
+  ) {
+    const inferred = classifyDaytonaRuntimeError(metadata.lastInitError);
+    if (inferred && !inferred.retriable) return 'terminal';
+  }
   if (
     typeof metadata.runtimeWakeError === 'string' &&
     TERMINAL_RUNTIME_WAKE_ERRORS.has(metadata.runtimeWakeError)
@@ -366,6 +388,9 @@ export const RUNTIME_START_FAILURE_KEYS = [
   'runtimeStartFailureCount',
   'runtimeStartFailedAt',
   'runtimeStartRetryAfterAt',
+  'runtimeWakeErrorCode',
+  'runtimeWakeErrorMessage',
+  'runtimeWakeRetriable',
 ] as const;
 
 /** The start call gave up or lost its connection: the provider may still be starting the box. */
@@ -397,7 +422,7 @@ export async function executeClaimedRuntimeWake(input: {
   start: () => Promise<void>;
   stop: () => Promise<void>;
   finalize: () => Promise<boolean>;
-  fail: (reason: string) => Promise<boolean>;
+  fail: (reason: string, error?: unknown) => Promise<boolean>;
   claimState: () => Promise<'owned' | 'delegated' | 'cancelled'>;
   isMissingError?: (error: unknown) => boolean;
   waitOptions?: Parameters<typeof waitForRuntimeWakeRunning>[1];
@@ -426,7 +451,7 @@ export async function executeClaimedRuntimeWake(input: {
     } catch (error) {
       startError = error;
       if (!isAmbiguousRuntimeStartError(error)) {
-        await input.fail(input.isMissingError?.(error) ? 'missing' : 'start_failed');
+        await input.fail(input.isMissingError?.(error) ? 'missing' : 'start_failed', error);
         return 'failed';
       }
     }
@@ -451,6 +476,6 @@ export async function executeClaimedRuntimeWake(input: {
 
   const reason =
     status === 'removed' ? 'missing' : startError ? 'start_timeout' : 'provider_not_running';
-  await input.fail(reason);
+  await input.fail(reason, startError ?? undefined);
   return 'failed';
 }

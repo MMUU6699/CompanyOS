@@ -58,7 +58,7 @@ function useCallBox(call: ActiveCall): { sandboxId?: string; failed?: boolean } 
         if (stopped) return;
         const sandboxId = started?.stage === 'ready' ? started.sandbox?.external_id : undefined;
         if (sandboxId) return void setBox({ sandboxId });
-        if (started && started.stage === 'failed' && !started.retriable) return void setBox({ failed: true });
+        if (started && (started.stage === 'failed' || started.stage === 'error') && !started.retriable) return void setBox({ failed: true });
         await new Promise((r) => setTimeout(r, 1000));
       }
       if (!stopped) setBox({ failed: true });

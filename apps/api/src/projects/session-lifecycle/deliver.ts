@@ -119,7 +119,7 @@ export async function deliverWithRetry(input: {
     // box, `failed` is a parked one; both come back, and this prompt has to
     // still be here when they do. Returning `failed` here dead-lettered the
     // user's message on its first attempt.
-    if (healed.stage === 'failed' || healed.stage === 'stopped') return 'unreachable';
+    if (healed.stage === 'failed' || healed.stage === 'error' || healed.stage === 'stopped') return 'unreachable';
     current = healed;
   }
 }
@@ -231,7 +231,7 @@ export async function deliverAfterWake(ctx: WakeDeliveryContext): Promise<Sessio
           break;
         }
         // Runtime down, prompt fine. See `deliverWithRetry`'s identical branch.
-        if (opened.stage === 'failed' || opened.stage === 'stopped') return 'unreachable';
+        if (opened.stage === 'failed' || opened.stage === 'error' || opened.stage === 'stopped') return 'unreachable';
         if (Date.now() >= deadline) {
           console.warn('[session-lifecycle] runtime not ready before delivery deadline', {
             sessionId,

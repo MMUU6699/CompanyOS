@@ -33,6 +33,10 @@ import {
   stampedRuntimeFailureState,
 } from '../session-lifecycle/runtime-wake-fence';
 import { forRequestApiUrl } from '../../shared/domain-aliases';
+import {
+  classifyDaytonaRuntimeError,
+  isNonRetriableDaytonaCode,
+} from '../../shared/daytona-errors';
 
 /**
  * The relative proxy path a client uses for all daemon (port 8000) traffic for
@@ -271,6 +275,33 @@ export function stoppedWakeResult(
     next_retry_at: retryAtMs !== null ? new Date(retryAtMs).toISOString() : null,
   };
 
+  const inferredWakeError =
+    typeof metadata.runtimeWakeErrorCode !== 'string' &&
+    typeof metadata.lastInitError === 'string' &&
+    metadata.lastInitError.length > 0
+      ? classifyDaytonaRuntimeError(metadata.lastInitError)
+      : null;
+  const wakeErrorCode =
+    typeof metadata.runtimeWakeErrorCode === 'string' && metadata.runtimeWakeErrorCode.length > 0
+      ? metadata.runtimeWakeErrorCode
+      : (inferredWakeError?.code ?? null);
+  const wakeErrorMessage =
+    typeof metadata.runtimeWakeErrorMessage === 'string' && metadata.runtimeWakeErrorMessage.length > 0
+      ? metadata.runtimeWakeErrorMessage
+      : (inferredWakeError?.message ?? null);
+  const wakeRetriable =
+    typeof metadata.runtimeWakeRetriable === 'boolean'
+      ? metadata.runtimeWakeRetriable
+      : inferredWakeError
+        ? inferredWakeError.retriable
+        : null;
+  const wakeFailureCategory: SessionStartFailure['category'] =
+    wakeErrorCode === 'DAYTONA_QUOTA_EXCEEDED' ||
+    wakeErrorCode === 'DAYTONA_SNAPSHOT_BUILDING' ||
+    wakeErrorCode === 'DAYTONA_RATE_LIMITED'
+      ? 'provider-capacity'
+      : 'sandbox-provider';
+
   if (failureState === 'cooling_down') {
     // NOT a terminal answer and no longer dressed as one: the server itself
     // re-attempts once the cooldown lapses, so the honest stage is `starting`
@@ -283,15 +314,47 @@ export function stoppedWakeResult(
       runtime_session_id: runtimeSessionId,
       runtime_url: sessionRuntimeUrlPath(row.externalId),
       reason: 'runtime_wake_cooldown',
+      ...(wakeErrorCode ? { code: wakeErrorCode } : {}),
+      ...(wakeErrorMessage ? { message: wakeErrorMessage } : {}),
       failure: {
-        category: 'sandbox-provider',
+        category: wakeFailureCategory,
+        ...(wakeErrorCode ? { code: wakeErrorCode } : {}),
         message: bootError
           ? runtimeBootErrorMessage(bootError)
-          : failureCount > 1
-            ? `The runtime did not start (attempt ${failureCount}). Retrying automatically.`
-            : 'The runtime did not start. Retrying automatically.',
+          : wakeErrorMessage
+            ? wakeErrorMessage
+            : failureCount > 1
+              ? `The runtime did not start (attempt ${failureCount}). Retrying automatically.`
+              : 'The runtime did not start. Retrying automatically.',
         retryable: true,
         evidence,
+      },
+    };
+  }
+
+  // Non-retriable provider error (suspended org / depleted credits, revoked key,
+  // missing region, invalid snapshot): surface `{ stage: 'error', code, message, retriable: false }`
+  // immediately so the UI stops polling and renders the exact actionable reason.
+  if (wakeRetriable === false || isNonRetriableDaytonaCode(wakeErrorCode)) {
+    const message =
+      wakeErrorMessage ??
+      'The sandbox provider rejected starting this session. Check your cloud computer settings and try again.';
+    return {
+      stage: 'error',
+      ...(wakeErrorCode ? { code: wakeErrorCode } : {}),
+      message,
+      agent_name: agentName ?? 'default',
+      retriable: false,
+      sandbox: serializeSandboxRow(row),
+      runtime_session_id: runtimeSessionId,
+      runtime_url: sessionRuntimeUrlPath(row.externalId),
+      reason: wakeErrorCode ?? stampReason,
+      failure: {
+        category: wakeFailureCategory,
+        ...(wakeErrorCode ? { code: wakeErrorCode } : {}),
+        message,
+        retryable: false,
+        evidence: { ...evidence, next_retry_at: null },
       },
     };
   }
@@ -307,11 +370,15 @@ export function stoppedWakeResult(
     runtime_session_id: runtimeSessionId,
     runtime_url: sessionRuntimeUrlPath(row.externalId),
     reason: stampReason,
+    ...(wakeErrorCode ? { code: wakeErrorCode } : {}),
     failure: {
-      category: 'sandbox-provider',
+      category: wakeFailureCategory,
+      ...(wakeErrorCode ? { code: wakeErrorCode } : {}),
       message: bootError
         ? runtimeBootErrorMessage(bootError, Math.min(failureCount, RUNTIME_START_MAX_FAILURES))
-        : `The session runtime did not become reachable after ${Math.min(failureCount, RUNTIME_START_MAX_FAILURES)} attempts. Restart the session to try again.`,
+        : wakeErrorMessage
+          ? wakeErrorMessage
+          : `The session runtime did not become reachable after ${Math.min(failureCount, RUNTIME_START_MAX_FAILURES)} attempts. Restart the session to try again.`,
       retryable: true,
       evidence,
     },
@@ -351,6 +418,10 @@ export function sessionStartFailureFromSandbox(
       ? inferredFailure
       : null;
   const category = inferredSpecificFailure?.category ?? storedCategory;
+  const code =
+    typeof metadata.failureCode === 'string' && metadata.failureCode.length > 0
+      ? metadata.failureCode
+      : (inferredSpecificFailure?.code ?? inferredFailure?.code);
   const message =
     inferredSpecificFailure?.userMessage ??
     (typeof metadata.errorMessage === 'string' && metadata.errorMessage.length > 0
@@ -365,9 +436,11 @@ export function sessionStartFailureFromSandbox(
     'invalid-secret-boundary-policy',
     'snapshot-too-large',
   ]);
+  const nonRetriableDaytona = isNonRetriableDaytonaCode(code);
   return {
     category,
+    ...(code ? { code } : {}),
     message,
-    retryable: !PERMANENT.has(category),
+    retryable: !PERMANENT.has(category) && !nonRetriableDaytona,
   };
 }

@@ -921,6 +921,7 @@ function ProjectSessionView({ projectId, sessionId }: { projectId: string; sessi
         {
           ...metadata,
           failureCategory: session.failure.category,
+          ...(session.failure.code ? { failureCode: session.failure.code } : {}),
           errorMessage: session.failure.message,
         },
         sandboxLabel ?? 'session',
@@ -1005,7 +1006,37 @@ function ProjectSessionView({ projectId, sessionId }: { projectId: string; sessi
       recoverableFailure && wake.summary
         ? `${recoverableFailure.message} ${wake.summary}`
         : (recoverableFailure?.message ?? '');
-    const failureRecovery = (
+    const daytonaFailureCode = recoverableFailure?.code;
+    const isDaytonaBillingError =
+      daytonaFailureCode === 'DAYTONA_ORG_SUSPENDED' ||
+      daytonaFailureCode === 'DAYTONA_EMAIL_UNVERIFIED';
+    const isDaytonaReconnectError =
+      daytonaFailureCode === 'DAYTONA_RECONNECT_REQUIRED' ||
+      daytonaFailureCode === 'DAYTONA_NOT_CONNECTED' ||
+      daytonaFailureCode === 'DAYTONA_REGION_REQUIRED';
+    const failureRecovery = isDaytonaBillingError || isDaytonaReconnectError ? (
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        {isDaytonaBillingError ? (
+          <Button asChild size="sm">
+            <a
+              href="https://app.daytona.io/dashboard/billing"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open Daytona dashboard
+            </a>
+          </Button>
+        ) : null}
+        <Button asChild variant={isDaytonaBillingError ? 'outline' : 'default'} size="sm">
+          <Link href={`/workspaces/${projectId}/settings`}>
+            {isDaytonaBillingError ? 'Switch Daytona account' : 'Reconnect Daytona'}
+          </Link>
+        </Button>
+        <Button variant="outline" size="sm" onClick={handleProvisioningRetry} disabled={restart.isPending}>
+          Retry
+        </Button>
+      </div>
+    ) : (
       <ProviderFailureRecovery
         pendingPrompt={pendingPrompt}
         isRetrying={restart.isPending}

@@ -36,9 +36,10 @@
  */
 
 import React from 'react';
-import { ScrollView, View, type ScrollViewInstance } from 'react-native';
+import { Linking, ScrollView, View, type ScrollViewInstance } from 'react-native';
 import { useTranslation } from 'react-i18next';
 import {
+  createSessionPrompt,
   sessionLogTurns,
   type SessionLogThread,
   type SessionLogTurn,
@@ -71,7 +72,11 @@ import { webSpace } from '@/lib/session/user-message';
 import { useSessionMessageAuthors, useSessionParticipants } from '@/lib/projects/hooks';
 import { messageAvatarPerson } from '@/lib/session/participants';
 import { turnStoppedBy } from '@/lib/session/turn-stop';
-import { formatImageElapsed, type SessionImageStep } from '@/lib/session/connect-step';
+import { formatImageElapsed, type ConnectFailureActionKind, type SessionImageStep } from '@/lib/session/connect-step';
+import { mintWireMessageId } from '@/lib/session/wire-message-id';
+import { notifyDaytonaReconnectRequired } from '@/lib/onboarding/daytona-client';
+
+const DAYTONA_DASHBOARD_BILLING_URL = 'https://app.daytona.io/dashboard/billing';
 
 export interface SessionConnectError {
   title: string;
@@ -80,6 +85,10 @@ export interface SessionConnectError {
   detail?: string;
   /** The provider removed the box: the primary action is Continue (`recover`), not Restart. */
   lost?: boolean;
+  /** Typed machine-readable provider/onboarding error code when known. */
+  code?: string;
+  /** Actionable CTA for typed Daytona errors. */
+  actionKind?: ConnectFailureActionKind;
 }
 
 /** The first prompt has no session mentions yet. */
@@ -162,6 +171,8 @@ export function SessionConnecting({
         restarting={restarting}
         participants={participants}
         messageAuthors={messageAuthors}
+        projectId={projectId}
+        projectSessionId={projectSessionId}
       />
     );
   }
@@ -172,7 +183,7 @@ export function SessionConnecting({
         <FloatingComposerArea>
           {imageStep ? <ImageStatus step={imageStep} /> : statusLabel ? <WakingStatus label={statusLabel} /> : null}
           <View className="px-4 pb-3 pt-1">
-            <WakingComposer />
+            <WakingComposer projectId={projectId} projectSessionId={projectSessionId} />
           </View>
         </FloatingComposerArea>
       </View>
@@ -243,9 +254,9 @@ export function SessionConnecting({
         <View style={{ height: insets.bottom }} />
       ) : (
         <FloatingComposerArea onHeight={setBottomHeight}>
-          {imageStep ? <ImageStatus step={imageStep} /> : null}
+          {imageStep ? <ImageStatus step={imageStep} /> : statusLabel ? <WakingStatus label={statusLabel} /> : null}
           <View className="px-4 pb-3 pt-1">
-            <WakingComposer />
+            <WakingComposer projectId={projectId} projectSessionId={projectSessionId} />
           </View>
         </FloatingComposerArea>
       )}
@@ -281,9 +292,71 @@ function FloatingComposerArea({ children, onHeight }: { children: React.ReactNod
   );
 }
 
-/** The composer while the computer wakes: disabled, there is no runtime to send to yet. */
-function WakingComposer() {
-  return <Composer value="" onChangeText={noop} onSubmit={noop} disabled onAttach={noop} />;
+/**
+ * Interactive composer while the computer wakes: lets the user type and queue
+ * a message into the durable server inbox (`POST .../prompts`), which delivers
+ * automatically as soon as the sandbox becomes ready. Falls back to disabled
+ * only before a session id exists.
+ */
+function WakingComposer({
+  projectId,
+  projectSessionId,
+}: {
+  projectId?: string;
+  projectSessionId?: string;
+}) {
+  const [draft, setDraft] = React.useState('');
+  const [sending, setSending] = React.useState(false);
+  const [queuedCount, setQueuedCount] = React.useState(0);
+  const [queueError, setQueueError] = React.useState<string | null>(null);
+  const canQueue = Boolean(projectId && projectSessionId);
+
+  const handleSubmit = React.useCallback(async () => {
+    const trimmed = draft.trim();
+    if (!trimmed || !projectId || !projectSessionId || sending) return;
+    setSending(true);
+    setQueueError(null);
+    const nowMs = Date.now();
+    const messageId = mintWireMessageId({ nowMs, knownMessageIds: [] });
+    try {
+      await createSessionPrompt(projectId, projectSessionId, {
+        clientMessageId: `wake-${nowMs}-${Math.random().toString(36).slice(2, 8)}`,
+        messageId,
+        parts: [{ type: 'text', text: trimmed }],
+        placement: 'composer',
+        clientSentAtMs: nowMs,
+        remintOnDelivery: true,
+      });
+      setDraft('');
+      setQueuedCount((n) => n + 1);
+    } catch (err) {
+      setQueueError(err instanceof Error ? err.message : 'Could not queue message.');
+    } finally {
+      setSending(false);
+    }
+  }, [draft, projectId, projectSessionId, sending]);
+
+  return (
+    <View style={{ gap: 6 }}>
+      {queuedCount > 0 ? (
+        <Text variant="muted" className="px-2 text-xs">
+          {queuedCount === 1
+            ? '1 message queued — will run automatically when ready.'
+            : `${queuedCount} messages queued — will run automatically when ready.`}
+        </Text>
+      ) : null}
+      {queueError ? (
+        <Text className="px-2 text-xs text-destructive">{queueError}</Text>
+      ) : null}
+      <Composer
+        value={draft}
+        onChangeText={setDraft}
+        onSubmit={() => void handleSubmit()}
+        disabled={!canQueue || sending}
+        onAttach={noop}
+      />
+    </View>
+  );
 }
 
 /**
@@ -360,6 +433,8 @@ function SavedThread({
   restarting,
   participants,
   messageAuthors,
+  projectId,
+  projectSessionId,
 }: {
   turns: SessionLogTurn[];
   imageStep?: SessionImageStep | null;
@@ -371,6 +446,8 @@ function SavedThread({
   onCancel: () => void;
   onRestart?: () => void;
   restarting?: boolean;
+  projectId?: string;
+  projectSessionId?: string;
 }) {
   const insets = useSafeAreaInsets();
   const scrollRef = React.useRef<ScrollViewInstance>(null);
@@ -414,7 +491,7 @@ function SavedThread({
           <>
             {imageStep ? <ImageStatus step={imageStep} /> : statusLabel ? <WakingStatus label={statusLabel} /> : null}
             <View className="px-4 pb-3 pt-1">
-              <WakingComposer />
+              <WakingComposer projectId={projectId} projectSessionId={projectSessionId} />
             </View>
           </>
         )}
@@ -468,7 +545,21 @@ function ConnectErrorState({
         <Button variant="secondary" onPress={onCancel} className="flex-1 rounded-full">
           <Text>Back to workspace</Text>
         </Button>
-        {onRestart ? (
+        {error.actionKind === 'reconnect' ? (
+          <Button
+            variant="default"
+            onPress={() => notifyDaytonaReconnectRequired()}
+            className="flex-1 rounded-full">
+            <Text>Reconnect Daytona</Text>
+          </Button>
+        ) : error.actionKind === 'billing' ? (
+          <Button
+            variant="default"
+            onPress={() => void Linking.openURL(DAYTONA_DASHBOARD_BILLING_URL)}
+            className="flex-1 rounded-full">
+            <Text>Open Daytona</Text>
+          </Button>
+        ) : onRestart ? (
           <Button variant="default" onPress={onRestart} disabled={restarting} className="flex-1 rounded-full">
             {/* Restarting: the session's dot matrix in place of the icon, inside
                 the disabled pill, never a second loader (Jay, 2026-10-02). */}
@@ -485,6 +576,14 @@ function ConnectErrorState({
           </Button>
         ) : null}
       </View>
+      {error.actionKind === 'billing' ? (
+        <Button
+          variant="secondary"
+          onPress={() => notifyDaytonaReconnectRequired()}
+          className="rounded-full">
+          <Text>Connect a different Daytona account</Text>
+        </Button>
+      ) : null}
     </View>
   );
 }

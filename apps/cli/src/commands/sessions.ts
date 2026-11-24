@@ -759,7 +759,7 @@ async function sessionsNew(
           ready = true;
           break;
         }
-        if (start.stage === 'failed' || start.stage === 'stopped') {
+        if (start.stage === 'failed' || start.stage === 'error' || start.stage === 'stopped') {
           if (json) {
             emitJson(created);
           } else {

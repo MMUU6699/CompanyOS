@@ -1,6 +1,6 @@
 /** Raw `/start` stage, or `null` while the first `/start` is still in flight. */
 export type SessionStartStageValue =
-  'provisioning' | 'starting' | 'ready' | 'stopped' | 'failed' | null;
+  'provisioning' | 'starting' | 'ready' | 'stopped' | 'failed' | 'error' | null;
 
 export interface SessionTerminalState {
   /** Raw `/start` stage — the ONLY server-declared terminal signal. */
@@ -29,7 +29,7 @@ export interface SessionTerminalState {
  */
 export function isUnmaterializedSessionFailure(state: SessionTerminalState): boolean {
   if (state.hasStartError || state.retriable) return false;
-  if (state.stage !== 'failed') return false;
+  if (state.stage !== 'failed' && state.stage !== 'error') return false;
   return state.sandboxStatus == null;
 }
 

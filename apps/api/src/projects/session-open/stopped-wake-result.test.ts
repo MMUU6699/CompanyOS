@@ -250,4 +250,102 @@ describe('sessionStartFailureFromSandbox — a full provider storage quota', () 
       retryable: true,
     });
   });
+
+  test('a sandbox errored with Daytona Depleted credits returns non-retriable DAYTONA_ORG_SUSPENDED', () => {
+    const row = {
+      ...stoppedRow({
+        failureCategory: 'sandbox-provider',
+        lastProvisioningError: 'DaytonaAuthorizationError: Organization is suspended: Depleted credits',
+      }),
+      status: 'error' as const,
+    };
+    const res = sessionStartFailureFromSandbox(row);
+    expect(res?.code).toBe('DAYTONA_ORG_SUSPENDED');
+    expect(res?.retryable).toBe(false);
+    expect(res?.message.toLowerCase()).toContain('credits');
+  });
+});
+
+describe('stoppedWakeResult — non-retriable Daytona failures never hide behind cooling_down', () => {
+  test('suspended org / depleted credits immediately returns stage=error, retriable=false on attempt 1', () => {
+    const suspended = {
+      stopReason: 'runtime_wake_failed',
+      runtimeWakeError: 'start_failed',
+      runtimeWakeErrorCode: 'DAYTONA_ORG_SUSPENDED',
+      runtimeWakeErrorMessage:
+        'Your Daytona workspace ran out of credits and is suspended. Add credits in your Daytona dashboard, or connect a different Daytona account in Settings -> Cloud computer.',
+      runtimeWakeRetriable: false,
+      lastInitError: 'Organization is suspended: Depleted credits',
+      runtimeStartFailedAt: FAILED_AT.toISOString(),
+      runtimeStartFailureCount: 1,
+      runtimeStartRetryAfterAt: at(120_000).toISOString(),
+    };
+    const result = stoppedWakeResult(stoppedRow(suspended), 'default', null, at(5_000));
+    expect(result?.stage).toBe('error');
+    expect(result?.retriable).toBe(false);
+    expect(result?.code).toBe('DAYTONA_ORG_SUSPENDED');
+    expect(result?.message?.toLowerCase()).toContain('credits');
+    expect(result?.failure?.code).toBe('DAYTONA_ORG_SUSPENDED');
+    expect(result?.failure?.retryable).toBe(false);
+    expect(result?.failure?.evidence?.next_retry_at).toBeNull();
+  });
+
+  test('legacy row with lastInitError="Organization is suspended: Depleted credits" also returns stage=error immediately', () => {
+    const legacyRow = {
+      stopReason: 'runtime_wake_failed',
+      runtimeWakeError: 'start_failed',
+      lastInitError: 'DaytonaAuthorizationError: Organization is suspended: Depleted credits',
+      runtimeStartFailedAt: FAILED_AT.toISOString(),
+      runtimeStartFailureCount: 1,
+      runtimeStartRetryAfterAt: at(120_000).toISOString(),
+    };
+    const result = stoppedWakeResult(stoppedRow(legacyRow), 'default', null, at(5_000));
+    expect(result?.stage).toBe('error');
+    expect(result?.code).toBe('DAYTONA_ORG_SUSPENDED');
+    expect(result?.retriable).toBe(false);
+  });
+
+  test.each([
+    ['DAYTONA_RECONNECT_REQUIRED', 'Your Daytona connection expired or was revoked.'],
+    ['DAYTONA_NOT_CONNECTED', 'Connect your Daytona account to start a session.'],
+    ['DAYTONA_REGION_REQUIRED', 'Your Daytona workspace needs a default region selected.'],
+    ['DAYTONA_SNAPSHOT_FAILED', 'Snapshot not found or invalid.'],
+  ])('non-retriable %s immediately returns stage=error', (code, msg) => {
+    const row = stoppedRow({
+      stopReason: 'runtime_wake_failed',
+      runtimeWakeError: 'start_failed',
+      runtimeWakeErrorCode: code,
+      runtimeWakeErrorMessage: msg,
+      runtimeWakeRetriable: false,
+      runtimeStartFailedAt: FAILED_AT.toISOString(),
+      runtimeStartFailureCount: 1,
+      runtimeStartRetryAfterAt: at(120_000).toISOString(),
+    });
+    const result = stoppedWakeResult(row, 'default', null, at(1_000));
+    expect(result?.stage).toBe('error');
+    expect(result?.code).toBe(code);
+    expect(result?.message).toBe(msg);
+    expect(result?.retriable).toBe(false);
+  });
+
+  test('retriable Daytona errors (quota busy, snapshot building) stay in starting cooldown with real code + message', () => {
+    const busy = stoppedRow({
+      stopReason: 'runtime_wake_failed',
+      runtimeWakeError: 'start_failed',
+      runtimeWakeErrorCode: 'DAYTONA_QUOTA_EXCEEDED',
+      runtimeWakeErrorMessage:
+        'All active cloud computers in your Daytona workspace are currently running tasks.',
+      runtimeWakeRetriable: true,
+      runtimeStartFailedAt: FAILED_AT.toISOString(),
+      runtimeStartFailureCount: 1,
+      runtimeStartRetryAfterAt: at(120_000).toISOString(),
+    });
+    const result = stoppedWakeResult(busy, 'default', null, at(5_000));
+    expect(result?.stage).toBe('starting');
+    expect(result?.retriable).toBe(true);
+    expect(result?.reason).toBe('runtime_wake_cooldown');
+    expect(result?.code).toBe('DAYTONA_QUOTA_EXCEEDED');
+    expect(result?.failure?.code).toBe('DAYTONA_QUOTA_EXCEEDED');
+    expect(result?.failure?.message).toContain('currently running tasks');
+  });
 });

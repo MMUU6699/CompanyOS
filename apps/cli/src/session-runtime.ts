@@ -104,7 +104,7 @@ export async function waitForSessionReady(
     // provisioner picks it up — only treat it as terminal once that grace is
     // clearly over.
     if (stage === 'stopped' && i < 5) continue;
-    if (stage === 'failed' || stage === 'stopped') {
+    if (stage === 'failed' || stage === 'error' || stage === 'stopped') {
       throw new SessionRuntimeError(
         'start-failed',
         `Session did not start (${stage}${reason ? `: ${reason}` : ''}).`,

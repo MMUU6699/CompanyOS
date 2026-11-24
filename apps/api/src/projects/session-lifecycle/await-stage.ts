@@ -11,7 +11,7 @@ export const START_AWAIT_MAX_MS = 15_000;
 export const START_AWAIT_POLL_MS = 200;
 
 export const isTerminalStage = (stage: string): boolean =>
-  stage === 'ready' || stage === 'failed' || stage === 'stopped';
+  stage === 'ready' || stage === 'failed' || stage === 'error' || stage === 'stopped';
 
 /**
  * Bounded long-poll loop. Given an initial readiness result and a `resolve` that

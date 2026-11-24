@@ -8,6 +8,7 @@ interface ProvisioningFailurePresentation {
   title: string;
   message: string;
   retryable: boolean;
+  code?: string;
 }
 
 /** Build stable error-card copy from API-owned sandbox failure metadata. */
@@ -19,22 +20,46 @@ export function provisioningFailurePresentation(
   const resolvedSandboxLabel = sandboxLabel ?? 'session';
   const category =
     typeof metadata.failureCategory === 'string' ? metadata.failureCategory : 'sandbox-provider';
+  const code =
+    typeof metadata.failureCode === 'string' && metadata.failureCode.length > 0
+      ? metadata.failureCode
+      : undefined;
   const message =
     (typeof metadata.errorMessage === 'string' && metadata.errorMessage) ||
     'The sandbox provider could not start this session. Try again.';
 
+  if (code === 'DAYTONA_ORG_SUSPENDED') {
+    return { title: 'Daytona workspace suspended', message, retryable: false, code };
+  }
+  if (code === 'DAYTONA_RECONNECT_REQUIRED') {
+    return { title: 'Reconnect Daytona', message, retryable: false, code };
+  }
+  if (code === 'DAYTONA_NOT_CONNECTED') {
+    return { title: 'Connect Daytona', message, retryable: false, code };
+  }
+  if (code === 'DAYTONA_REGION_REQUIRED') {
+    return { title: 'Daytona region required', message, retryable: false, code };
+  }
+  if (code === 'DAYTONA_EMAIL_UNVERIFIED') {
+    return { title: 'Verify your Daytona email', message, retryable: false, code };
+  }
+  if (code === 'DAYTONA_SNAPSHOT_FAILED' || code === 'DAYTONA_SNAPSHOT_CONFIG_INVALID') {
+    return { title: 'Cloud computer image unavailable', message, retryable: false, code };
+  }
+
   if (category === 'provider-capacity') {
-    return { title: tI18nComplete.raw('textb3e53ad64339'), message, retryable: true };
+    return { title: tI18nComplete.raw('textb3e53ad64339'), message, retryable: true, ...(code ? { code } : {}) };
   }
 
   if (category === 'git-auth') {
-    return { title: tI18nComplete.raw('textd557bdc340e8'), message, retryable: true };
+    return { title: tI18nComplete.raw('textd557bdc340e8'), message, retryable: true, ...(code ? { code } : {}) };
   }
 
   return {
     title: tI18nComplete('text35e233062c2c', { value0: resolvedSandboxLabel }),
     message,
     retryable: true,
+    ...(code ? { code } : {}),
   };
 }
 

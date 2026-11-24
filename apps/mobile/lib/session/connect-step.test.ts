@@ -84,6 +84,51 @@ describe('connectStepFromStart', () => {
     const step = connectStepFromStart({ stage: 'starting', retriable: false, sandbox: null, failure: null });
     expect(step.kind).toBe('fail');
   });
+
+  test('surfaces stage=error with DAYTONA_ORG_SUSPENDED as billing failure instead of polling', () => {
+    const step = connectStepFromStart({
+      stage: 'error',
+      retriable: false,
+      code: 'DAYTONA_ORG_SUSPENDED',
+      message: 'Your Daytona workspace ran out of credits and is suspended.',
+      sandbox: { status: 'stopped', external_id: 'ext-1' },
+      failure: {
+        category: 'sandbox-provider',
+        code: 'DAYTONA_ORG_SUSPENDED',
+        message: 'Your Daytona workspace ran out of credits and is suspended.',
+        retryable: false,
+      },
+    });
+    expect(step).toEqual({
+      kind: 'fail',
+      failure: {
+        title: 'Daytona workspace suspended',
+        message: 'Your Daytona workspace ran out of credits and is suspended.',
+        code: 'DAYTONA_ORG_SUSPENDED',
+        actionKind: 'billing',
+      },
+    });
+  });
+
+  test('surfaces stage=error with DAYTONA_RECONNECT_REQUIRED as reconnect failure', () => {
+    const step = connectStepFromStart({
+      stage: 'error',
+      retriable: false,
+      code: 'DAYTONA_RECONNECT_REQUIRED',
+      message: 'Your Daytona connection expired or was revoked.',
+      sandbox: { status: 'stopped', external_id: 'ext-1' },
+      failure: null,
+    });
+    expect(step).toEqual({
+      kind: 'fail',
+      failure: {
+        title: 'Reconnect Daytona',
+        message: 'Your Daytona connection expired or was revoked.',
+        code: 'DAYTONA_RECONNECT_REQUIRED',
+        actionKind: 'reconnect',
+      },
+    });
+  });
 });
 
 describe('connectStepFromRequestError', () => {

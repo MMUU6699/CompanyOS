@@ -133,6 +133,7 @@ export function deriveBootPhase(result: SessionStartResult): SessionStartBootPha
     case 'stopped':
       return 'parked';
     case 'failed':
+    case 'error':
       return 'failed';
     default:
       return result.reason && RESUMING_REASONS.has(result.reason) ? 'resuming' : 'booting';

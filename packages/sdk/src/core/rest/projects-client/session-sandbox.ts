@@ -41,7 +41,7 @@ export interface ProjectSessionSandbox {
 export type WorkspaceSessionSandbox = ProjectSessionSandbox;
 
 export type SessionStartStage =
-  "provisioning" | "starting" | "ready" | "stopped" | "failed";
+  "provisioning" | "starting" | "ready" | "stopped" | "failed" | "error";
 
 /**
  * Where a provisioning session is in getting its sandbox image
@@ -84,6 +84,8 @@ export interface SessionStartFailure {
     | 'invalid-secret-boundary-policy'
     | 'snapshot-too-large'
     | 'drives-unavailable';
+  /** Typed machine-readable provider/onboarding error code when classified. */
+  code?: string;
   message: string;
   /** A user action can retry. Automatic polling must still stop. */
   retryable: boolean;
@@ -115,6 +117,10 @@ export interface SessionStartResult {
   runtime_session_id?: string | null;
   /** Stable terminal failure. Provider-specific diagnostics stay internal. */
   failure?: SessionStartFailure | null;
+  /** Top-level machine-readable provider/onboarding error code when stage is `error` or a typed failure applies. */
+  code?: string;
+  /** Top-level user-facing error message mirroring `failure.message` when stage is `error`. */
+  message?: string;
   /**
    * Relative proxy path for this session's runtime (port 8000), composed
    * against the configured backendUrl. The server owns the proxy scheme; the SDK

@@ -60,7 +60,13 @@ export function sessionWakeStatusNote(input: {
   let end = error?.length ?? 0;
   while (error && end > 0 && /[.\s]/.test(error[end - 1])) end--;
   const bootError = error?.slice(0, end);
-  const lead = bootError ? `Could not start the agent: ${bootError}.` : 'Still starting your computer.';
+  const typedLead =
+    !bootError && input.failure.code && input.failure.message
+      ? input.failure.message.replace(/\s+$/, '')
+      : null;
+  const lead = bootError
+    ? `Could not start the agent: ${bootError}.`
+    : (typedLead ?? 'Still starting your computer.');
   const attempts = Math.max(1, evidence?.attempts ?? 1);
   const nextAttempt = attempts + 1;
   const retryAt = Date.parse(evidence?.next_retry_at ?? '');

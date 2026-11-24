@@ -13,7 +13,7 @@
  * package, so only the fields the CLI reads are declared here.
  */
 
-export type SessionStartStage = 'provisioning' | 'starting' | 'ready' | 'stopped' | 'failed';
+export type SessionStartStage = 'provisioning' | 'starting' | 'ready' | 'stopped' | 'failed' | 'error';
 
 /** `SESSION_START_IMAGE_STATES`. A newer API may add one: it prints humanized. */
 export type SessionStartImageState =

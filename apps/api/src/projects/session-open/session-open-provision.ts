@@ -516,13 +516,23 @@ export async function openUnusableRow(
       if (retried) return retried;
     }
     if (['failed', 'stopped', 'completed'].includes(visible.row.status)) {
+      const failure = row ? sessionStartFailureFromSandbox(row) : null;
+      const isTypedNonRetriableError =
+        visible.row.status === 'failed' && Boolean(failure?.code) && failure?.retryable === false;
       return {
-        stage: visible.row.status === 'failed' ? 'failed' : 'stopped',
+        stage: isTypedNonRetriableError
+          ? 'error'
+          : visible.row.status === 'failed'
+            ? 'failed'
+            : 'stopped',
         agent_name: visible.row.agentName ?? 'default',
         retriable: false,
         sandbox: row?.status === 'error' ? serializeSandboxRow(row) : null,
         runtime_session_id: null,
-        failure: row ? sessionStartFailureFromSandbox(row) : null,
+        ...(isTypedNonRetriableError && failure?.code
+          ? { code: failure.code, message: failure.message, reason: failure.code }
+          : {}),
+        failure,
       };
     }
     if (visible.row.status !== 'provisioning') {

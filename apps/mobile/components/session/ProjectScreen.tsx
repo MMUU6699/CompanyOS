@@ -189,11 +189,11 @@ const coveringRouteOptions = ({ route }: { route: { params?: object } }) => ({
 const EMPTY_SUB_AGENTS: ProjectSession[] = [];
 
 /**
- * What the waking view says. The composer there is disabled, so it promises
- * no send (the SDK's `SESSION_NOTICE.waking` says messages queue; web keeps
- * its live send button, mobile does not).
+ * What the waking view says while the sandbox resumes in the background.
+ * Typing and queueing a message is allowed; queued messages deliver automatically
+ * once the sandbox becomes ready.
  */
-const WAKING_NOTICE = "Waking this session's computer. You can send messages when it's ready.";
+const WAKING_NOTICE = "Waking this session's computer. Messages you send are queued and delivered automatically.";
 
 export function ProjectScreen() {
   const { id: projectId } = useLocalSearchParams<{ id: string }>();
@@ -269,7 +269,7 @@ export function ProjectScreen() {
     setHomeKey((key) => key + 1);
   }, []);
   const {
-    connectingProjectSessionId, connectError, connectImage, restartingSession,
+    connectingProjectSessionId, connectError, connectImage, connectStatusNote, restartingSession,
     connectingRow, connectingFirstPrompt, connectingTitle, activeProjectSession,
     openedThreadRef, openedProjectSessionIdsRef, pendingThreadFocusRef, returnThreadRef,
     isHomeRef, ensuringRef, navigateToSession, goHome, refreshSessionLists,
@@ -812,7 +812,7 @@ export function ProjectScreen() {
               restarting={restartingSession}
               showLoader={!viewDrawerOpen}
               thread={savedCopyThread}
-              statusLabel={WAKING_NOTICE}
+              statusLabel={connectStatusNote ?? WAKING_NOTICE}
               sessionId={savedCopyRootId ?? savedCopyThread?.thread_id ?? undefined}
               empty={connectingEmpty}
               projectId={projectId}
@@ -847,6 +847,8 @@ export function ProjectScreen() {
     connectingTitle,
     connectingFirstPrompt,
     connectError,
+    connectImage,
+    connectStatusNote,
     handleCancelConnect,
     handleRestartSession,
     restartingSession,

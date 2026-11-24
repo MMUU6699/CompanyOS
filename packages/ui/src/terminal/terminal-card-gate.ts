@@ -58,6 +58,7 @@ export function shouldPaintFatalCard(input: { stage: SessionStartStage | null })
   switch (input.stage) {
     case 'stopped':
     case 'failed':
+    case 'error':
       return true;
     case null:
     case 'provisioning':

@@ -177,7 +177,13 @@ async function runOpenSession(
     log.observedAt,
   );
   if (existingWake) {
-    log.did(existingWake.reason === 'runtime_wake_cooldown' ? 'cooling_down' : 'awaited_wake');
+    log.did(
+      existingWake.reason === 'runtime_wake_cooldown'
+        ? 'cooling_down'
+        : existingWake.stage === 'error'
+          ? 'reconciled'
+          : 'awaited_wake',
+    );
     return existingWake;
   }
 
@@ -219,6 +225,7 @@ async function runOpenSession(
   );
   if (resumedWake) {
     if (resumedWake.reason === 'runtime_wake_cooldown') log.did('cooling_down');
+    else if (resumedWake.stage === 'error') log.did('reconciled');
     return resumedWake;
   }
 

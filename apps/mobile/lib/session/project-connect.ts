@@ -65,6 +65,9 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
   const [imageAnswer, setImageAnswer] = useState<{ sessionId: string; step: SessionImageStep | null } | null>(null);
   const connectImage =
     imageAnswer && imageAnswer.sessionId === connectingProjectSessionId ? imageAnswer.step : null;
+  const [statusNoteAnswer, setStatusNoteAnswer] = useState<{ sessionId: string; note: string | null } | null>(null);
+  const connectStatusNote =
+    statusNoteAnswer && statusNoteAnswer.sessionId === connectingProjectSessionId ? statusNoteAnswer.note : null;
   const [restartingSession, setRestartingSession] = useState(false);
   // Sessions whose connect loop ended in an error — guards the auto-connect
   // effect from immediately re-driving (and re-looping) a known-failed session.
@@ -291,6 +294,13 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
 
           const image = sessionImageStep(start);
           setImageAnswer({ sessionId, step: image });
+          setStatusNoteAnswer({
+            sessionId,
+            note:
+              start.reason === 'runtime_wake_cooldown' && start.failure?.message
+                ? start.failure.message
+                : null,
+          });
           deadline = startWaitDeadline(deadline, Date.now(), image);
 
           const step = connectStepFromStart(start);
@@ -375,6 +385,7 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
         if (ensuringRef.current === sessionId) ensuringRef.current = null;
         // Opened, failed or left: the session waits on no image any more.
         setImageAnswer((current) => (current?.sessionId === sessionId ? null : current));
+        setStatusNoteAnswer((current) => (current?.sessionId === sessionId ? null : current));
       }
     },
     [projectId, queryClient, connectToProjectSession, failConnect, showUpgradeForError]
@@ -589,7 +600,7 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
     }
   }, [connectingProjectSessionId, goHome, projectId, refreshSessionLists]);
   return {
-    connectingProjectSessionId, connectError, connectImage, restartingSession,
+    connectingProjectSessionId, connectError, connectImage, connectStatusNote, restartingSession,
     connectingRow, connectingFirstPrompt, connectingTitle, activeProjectSession,
     openedThreadRef, openedProjectSessionIdsRef, pendingThreadFocusRef, returnThreadRef,
     isHomeRef, ensuringRef, navigateToSession, goHome, refreshSessionLists,

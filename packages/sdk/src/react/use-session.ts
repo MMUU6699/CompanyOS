@@ -313,7 +313,7 @@ export function shouldPollSessionStart(
   if (isSessionStartError(error)) return false;
   if (data?.retriable === false) return false;
   const stage = data?.stage;
-  if (stage === 'ready' || stage === 'failed' || stage === 'stopped') return false;
+  if (stage === 'ready' || stage === 'failed' || stage === 'error' || stage === 'stopped') return false;
   const retryPause = sessionStartRetryPauseMs(data, now);
   return retryPause ?? SESSION_START_POLL_MS;
 }
@@ -1352,7 +1352,7 @@ export function useSession(projectId: string, sessionId: string, options: UseSes
   const stage = startData?.stage ?? null;
   const sandbox = startData?.sandbox ?? null;
   const startReady = stage === 'ready';
-  const terminal = stage === 'failed' || stage === 'stopped';
+  const terminal = stage === 'failed' || stage === 'error' || stage === 'stopped';
   // The window follows the computer (KRTX-1729): one that becomes ready reads
   // it at once, and one that stops ends it, with any response in flight.
   const startReadyRef = useRef(startReady);

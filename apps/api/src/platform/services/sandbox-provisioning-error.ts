@@ -1,3 +1,5 @@
+import { classifyDaytonaRuntimeError } from '../../shared/daytona-errors';
+
 export type SandboxProvisioningFailureCategory =
   | 'provider-capacity'
   | 'git-auth'
@@ -8,6 +10,8 @@ export type SandboxProvisioningFailureCategory =
 
 export interface SandboxProvisioningFailure {
   category: SandboxProvisioningFailureCategory;
+  /** Optional typed provider/onboarding code (e.g. DAYTONA_ORG_SUSPENDED). */
+  code?: string;
   userMessage: string;
   isCapacity: boolean;
   isGitAuth: boolean;
@@ -160,10 +164,12 @@ function failure(
   rawMessage: string,
   userMessage?: string,
   transient?: boolean,
+  code?: string,
 ): SandboxProvisioningFailure {
   const policy = CATEGORY_POLICY[category];
   return {
     category,
+    ...(code ? { code } : {}),
     userMessage: userMessage ?? (policy.userMessage === FROM_RAW ? rawMessage : policy.userMessage),
     isCapacity: category === 'provider-capacity',
     isGitAuth: category === 'git-auth',
@@ -190,17 +196,18 @@ export function classifySandboxProvisioningFailure(error: unknown): SandboxProvi
     return failure('sandbox-provider', rawMessage, rawMessage.slice(RESIDENTIAL_PROXY_PREFIX.length), false);
   }
   if (DAYTONA_DEPLETED_CREDITS_PATTERN.test(rawMessage)) {
-    return failure('sandbox-provider', rawMessage, DAYTONA_DEPLETED_CREDITS_MESSAGE, false);
+    return failure('sandbox-provider', rawMessage, DAYTONA_DEPLETED_CREDITS_MESSAGE, false, 'DAYTONA_ORG_SUSPENDED');
   }
   if (DAYTONA_REGION_REQUIRED_PATTERN.test(rawMessage)) {
-    return failure('sandbox-provider', rawMessage, DAYTONA_REGION_REQUIRED_MESSAGE, false);
+    return failure('sandbox-provider', rawMessage, DAYTONA_REGION_REQUIRED_MESSAGE, false, 'DAYTONA_REGION_REQUIRED');
   }
   if (DAYTONA_ORG_SUSPENDED_PATTERN.test(rawMessage)) {
-    return failure('sandbox-provider', rawMessage, DAYTONA_ORG_SUSPENDED_MESSAGE, false);
+    return failure('sandbox-provider', rawMessage, DAYTONA_ORG_SUSPENDED_MESSAGE, false, 'DAYTONA_ORG_SUSPENDED');
   }
   if (DAYTONA_RECONNECT_PATTERN.test(rawMessage)) {
-    return failure('sandbox-provider', rawMessage, DAYTONA_RECONNECT_REQUIRED_MESSAGE, false);
+    return failure('sandbox-provider', rawMessage, DAYTONA_RECONNECT_REQUIRED_MESSAGE, false, 'DAYTONA_RECONNECT_REQUIRED');
   }
+
   const isStorageFull = STORAGE_FULL_PATTERN.test(rawMessage);
   const isCapacity = isStorageFull || CAPACITY_PATTERN.test(rawMessage);
   const isGitAuth = !isCapacity && GIT_AUTH_PATTERN.test(rawMessage);
@@ -222,6 +229,23 @@ export function classifySandboxProvisioningFailure(error: unknown): SandboxProvi
 
   if (isGitAuth) {
     return failure('git-auth', rawMessage);
+  }
+
+  const daytonaClassified = classifyDaytonaRuntimeError(error);
+  if (daytonaClassified) {
+    const category: SandboxProvisioningFailureCategory =
+      daytonaClassified.code === 'DAYTONA_QUOTA_EXCEEDED' ||
+      daytonaClassified.code === 'DAYTONA_SNAPSHOT_BUILDING' ||
+      daytonaClassified.code === 'DAYTONA_RATE_LIMITED'
+        ? 'provider-capacity'
+        : 'sandbox-provider';
+    return failure(
+      category,
+      rawMessage,
+      daytonaClassified.message,
+      daytonaClassified.retriable,
+      daytonaClassified.code,
+    );
   }
 
   return failure('sandbox-provider', rawMessage);

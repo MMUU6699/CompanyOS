@@ -11,6 +11,8 @@ import { type SandboxStatus, getProvider } from '../../platform/providers';
 import { isProviderNotFound } from '../../platform/providers/status';
 import { invalidateSandbox } from '../../sandbox-proxy/backend';
 import { db } from '../../shared/db';
+import { logger } from '../../lib/logger';
+import { classifyDaytonaRuntimeError } from '../../shared/daytona-errors';
 import { scheduleSandboxRuntimeRefresh } from '../lib/sandbox-runtime-refresh';
 import { scheduleSessionConfigConvergence } from '../lib/session-config-convergence';
 import { stripMetadataKeys } from '../session-lifecycle/sandbox-metadata-sql';
@@ -50,6 +52,9 @@ export const RUNTIME_WAKE_CLAIM_CLEARED_KEYS = [
   'preservedExternalId',
   'needsReprovision',
   'runtimeWakeError',
+  'runtimeWakeErrorCode',
+  'runtimeWakeErrorMessage',
+  'runtimeWakeRetriable',
   'runtimeWakeFailedAt',
   'runtimeWakeRetryAfterAt',
   'runtimeStartRetryAfterAt',
@@ -275,7 +280,7 @@ export async function resumeStoppedSandbox(
       void import('../../drives/service').then(({ reconcileSessionDrives }) => reconcileSessionDrives(row.sessionId));
       return true;
     },
-    fail: async (reason) => {
+    fail: async (reason, error) => {
       const failedAt = new Date();
       // Read the row back for the CONSECUTIVE-failure count: the cooldown this
       // stamp owes escalates with it, and the count is what eventually earns a
@@ -285,11 +290,26 @@ export async function resumeStoppedSandbox(
         .from(sessionSandboxes)
         .where(eq(sessionSandboxes.sandboxId, row.sandboxId))
         .limit(1);
+      const rawErrorText =
+        error instanceof Error
+          ? error.message
+          : typeof error === 'string' && error.trim()
+            ? error
+            : null;
+      const classified = error ? classifyDaytonaRuntimeError(error) : null;
       const failurePatch = {
         runtimeWakeError: reason,
         runtimeWakeFailedAt: failedAt.toISOString(),
         stopReason: 'runtime_wake_failed',
         stoppedAt: failedAt.toISOString(),
+        ...(rawErrorText ? { lastInitError: rawErrorText.slice(0, 500) } : {}),
+        ...(classified
+          ? {
+              runtimeWakeErrorCode: classified.code,
+              runtimeWakeErrorMessage: classified.message,
+              runtimeWakeRetriable: classified.retriable,
+            }
+          : {}),
         ...runtimeStartFailurePatch(
           (current?.metadata ?? {}) as Record<string, unknown>,
           failedAt,
@@ -298,6 +318,15 @@ export async function resumeStoppedSandbox(
           failedAt.getTime() + RUNTIME_WAKE_LATE_START_GUARD_MS,
         ).toISOString(),
       };
+      if (classified && !classified.retriable) {
+        logger.warn('[projects] non-retriable runtime wake failure', {
+          sandboxId: row.sandboxId,
+          sessionId: row.sessionId,
+          externalId,
+          provider: row.provider,
+          code: classified.code,
+        });
+      }
       const [failed] = await db
         .update(sessionSandboxes)
         .set({

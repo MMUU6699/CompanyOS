@@ -1745,6 +1745,7 @@ export const SESSION_START_STAGES = [
   'ready',
   'stopped',
   'failed',
+  'error',
 ] as const;
 export const SessionStartStageSchema = z.enum(SESSION_START_STAGES);
 export type SessionStartStage = z.infer<typeof SessionStartStageSchema>;
@@ -1795,6 +1796,8 @@ export const SessionStartFailureSchema = z
       'drives-unavailable',
       'sandbox-provider',
     ]),
+    /** Typed machine-readable provider/onboarding error code when classified (e.g. DAYTONA_ORG_SUSPENDED). */
+    code: z.string().optional(),
     message: z.string(),
     retryable: z.boolean(),
     /** Optional only for backward compatibility; every NEW failure carries it. */
@@ -1940,6 +1943,10 @@ export const SessionStartResultSchema = z.object({
   runtime_session_id: z.string().nullable(),
   /** Stable terminal failure. Raw provider text remains in sandbox metadata. */
   failure: SessionStartFailureSchema.nullable().optional(),
+  /** Top-level machine-readable provider/onboarding error code when stage is `error` or a typed failure applies. */
+  code: z.string().optional(),
+  /** Top-level user-facing error message mirroring `failure.message` when stage is `error`. */
+  message: z.string().optional(),
   /** Server-selected runtime REST transport. */
   runtime_transport: z.literal('rest').optional(),
   /**

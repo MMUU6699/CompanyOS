@@ -1655,6 +1655,7 @@ async function failSessionSandboxProvisioning(
         errorMessage: userMessage,
         lastProvisioningError: bgMessage.slice(0, 500),
         ...(failureCategory ? { failureCategory } : {}),
+        ...(failure.code ? { failureCode: failure.code } : {}),
         failureTransient,
       }),
     });

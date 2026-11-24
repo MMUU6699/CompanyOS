@@ -320,7 +320,7 @@ export async function runSessionsStart(argv: string[]): Promise<number> {
     result = await client.post<StartResult>(path, {});
     if (wait) {
       for (let i = 1; i < 75 && result.stage !== 'ready'; i += 1) {
-        if (result.stage === 'failed' || result.stage === 'stopped') break;
+        if (result.stage === 'failed' || result.stage === 'error' || result.stage === 'stopped') break;
         const line = json ? null : progress(result);
         if (line) process.stderr.write(`Session ${short(session.session_id)}: ${line}\n`);
         await new Promise((r) => setTimeout(r, intervalMs));
@@ -333,13 +333,13 @@ export async function runSessionsStart(argv: string[]): Promise<number> {
 
   if (json) {
     emitJson(result);
-    return result.stage === 'failed' || (wait && result.stage !== 'ready') ? 1 : 0;
+    return result.stage === 'failed' || result.stage === 'error' || (wait && result.stage !== 'ready') ? 1 : 0;
   }
   if (result.stage === 'ready') {
     process.stdout.write(`${status.ok(`${C.bold}${short(session.session_id)}${C.reset} is ready`)}\n`);
     return 0;
   }
-  if (result.stage === 'failed' || result.stage === 'stopped') {
+  if (result.stage === 'failed' || result.stage === 'error' || result.stage === 'stopped') {
     process.stderr.write(
       `${status.err(`Session ${result.stage}${result.reason ? `: ${result.reason}` : ''}.`)}\n`,
     );

@@ -10,6 +10,8 @@
  */
 import type { SessionStartResult } from '@kortix/sdk';
 
+export type ConnectFailureActionKind = 'reconnect' | 'billing' | 'retry';
+
 /** Structurally `SessionConnectError` (components/session/SessionConnecting). */
 export interface ConnectFailure {
   title: string;
@@ -18,6 +20,10 @@ export interface ConnectFailure {
   detail?: string;
   /** The provider removed the box: the action continues the session on a new computer (`recover`), not a restart. */
   lost?: boolean;
+  /** Typed machine-readable error code when known (e.g. DAYTONA_ORG_SUSPENDED). */
+  code?: string;
+  /** Primary remediation action for typed provider/onboarding errors. */
+  actionKind?: ConnectFailureActionKind;
 }
 
 export type ConnectStep =
@@ -35,19 +41,81 @@ const LOST_MESSAGE =
 /** Failed `/start` requests in a row before the loop gives up. */
 export const MAX_START_REQUEST_FAILURES = 3;
 
-type StartAnswer = Pick<SessionStartResult, 'stage' | 'retriable' | 'failure' | 'reason'> & {
+type StartAnswer = Pick<SessionStartResult, 'stage' | 'retriable' | 'failure' | 'reason' | 'code' | 'message'> & {
   sandbox: { status: string; external_id: string | null } | null;
 };
+
+function daytonaFailurePresentation(
+  code: string | undefined,
+  fallbackMessage: string,
+): ConnectFailure | null {
+  switch (code) {
+    case 'DAYTONA_ORG_SUSPENDED':
+      return {
+        title: 'Daytona workspace suspended',
+        message: fallbackMessage,
+        code,
+        actionKind: 'billing',
+      };
+    case 'DAYTONA_RECONNECT_REQUIRED':
+      return {
+        title: 'Reconnect Daytona',
+        message: fallbackMessage,
+        code,
+        actionKind: 'reconnect',
+      };
+    case 'DAYTONA_NOT_CONNECTED':
+      return {
+        title: 'Connect Daytona',
+        message: fallbackMessage,
+        code,
+        actionKind: 'reconnect',
+      };
+    case 'DAYTONA_REGION_REQUIRED':
+      return {
+        title: 'Daytona region required',
+        message: fallbackMessage,
+        code,
+        actionKind: 'reconnect',
+      };
+    case 'DAYTONA_EMAIL_UNVERIFIED':
+      return {
+        title: 'Verify your Daytona email',
+        message: fallbackMessage,
+        code,
+        actionKind: 'billing',
+      };
+    case 'DAYTONA_SNAPSHOT_FAILED':
+    case 'DAYTONA_SNAPSHOT_CONFIG_INVALID':
+      return {
+        title: 'Cloud computer image unavailable',
+        message: fallbackMessage,
+        code,
+        actionKind: 'retry',
+      };
+    default:
+      return null;
+  }
+}
 
 export function connectStepFromStart(start: StartAnswer): ConnectStep {
   // The provider removed the box and no in-place recovery answered (KRTX-2419).
   if (start.reason === 'runtime_identity_unavailable') {
     return { kind: 'fail', failure: { title: LOST_TITLE, message: LOST_MESSAGE, lost: true } };
   }
-  if (start.stage === 'failed' || start.sandbox?.status === 'error') {
+  const code = start.code ?? start.failure?.code;
+  const serverMessage = start.message ?? start.failure?.message;
+  if (start.stage === 'error' || start.stage === 'failed' || start.sandbox?.status === 'error') {
+    const daytonaFailure = daytonaFailurePresentation(
+      code,
+      serverMessage ?? 'The sandbox could not be started.',
+    );
+    if (daytonaFailure) {
+      return { kind: 'fail', failure: daytonaFailure };
+    }
     return fail(
       'Session failed to start',
-      start.failure?.message ?? 'The sandbox could not be provisioned.',
+      serverMessage ?? 'The sandbox could not be provisioned.',
     );
   }
   // Require `stage === 'ready'` before opening the thread: while `stage` is still
@@ -58,9 +126,16 @@ export function connectStepFromStart(start: StartAnswer): ConnectStep {
     return { kind: 'open' };
   }
   if (start.stage === 'stopped' || start.retriable === false) {
+    const daytonaFailure = daytonaFailurePresentation(
+      code,
+      serverMessage ?? 'The session runtime stopped. Restart it to continue.',
+    );
+    if (daytonaFailure) {
+      return { kind: 'fail', failure: daytonaFailure };
+    }
     return fail(
       'Session is not running',
-      start.failure?.message ?? 'The session runtime stopped. Restart it to continue.',
+      serverMessage ?? 'The session runtime stopped. Restart it to continue.',
     );
   }
   return { kind: 'poll' };
@@ -74,10 +149,18 @@ export function connectStepFromRequestError(
   consecutiveFailures: number,
 ): ConnectStep {
   const status = statusOf(error);
+  const code = codeOf(error);
   const terminal = status !== null && status >= 400 && status < 500 && status !== 408 && status !== 429;
   if (!terminal && consecutiveFailures < MAX_START_REQUEST_FAILURES) return { kind: 'poll' };
 
   const message = error instanceof Error && error.message ? error.message : null;
+  const daytonaFailure = daytonaFailurePresentation(
+    code,
+    message ?? 'Your Daytona connection needs attention before starting this session.',
+  );
+  if (daytonaFailure) {
+    return { kind: 'fail', failure: daytonaFailure };
+  }
   // No HTTP status: the request never reached the API (DNS, refused, offline).
   if (status === null) {
     return fail(
@@ -92,6 +175,13 @@ export function connectStepFromRequestError(
 function statusOf(error: unknown): number | null {
   const status = (error as { status?: unknown } | null)?.status;
   return typeof status === 'number' ? status : null;
+}
+
+function codeOf(error: unknown): string | undefined {
+  const obj = error as { code?: unknown; details?: { code?: unknown } } | null | undefined;
+  if (typeof obj?.code === 'string' && obj.code.length > 0) return obj.code;
+  if (typeof obj?.details?.code === 'string' && obj.details.code.length > 0) return obj.details.code;
+  return undefined;
 }
 
 function fail(title: string, message: string, detail?: string): ConnectStep {

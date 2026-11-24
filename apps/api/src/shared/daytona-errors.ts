@@ -398,3 +398,126 @@ export function sanitizeStoredDaytonaError(
   }
   return classifyDaytonaError(0, trimmed);
 }
+
+/**
+ * Daytona error codes that cannot succeed on automatic retry without user or
+ * operator action (add credits, reconnect Daytona, fix region/email, fix
+ * invalid snapshot). Session wake/open must surface these immediately as
+ * `{ stage: 'error', code, message, retriable: false }` instead of hiding them
+ * behind a `cooling_down` "Waking..." banner.
+ */
+export const NON_RETRIABLE_DAYTONA_CODES: ReadonlySet<DaytonaErrorCode> = new Set([
+  'DAYTONA_NOT_CONNECTED',
+  'DAYTONA_RECONNECT_REQUIRED',
+  'DAYTONA_ORG_SUSPENDED',
+  'DAYTONA_REGION_REQUIRED',
+  'DAYTONA_EMAIL_UNVERIFIED',
+  'DAYTONA_SNAPSHOT_CONFIG_INVALID',
+  'DAYTONA_SNAPSHOT_FAILED',
+]);
+
+export function isNonRetriableDaytonaCode(code: unknown): code is DaytonaErrorCode {
+  return isDaytonaErrorCode(code) && NON_RETRIABLE_DAYTONA_CODES.has(code);
+}
+
+/**
+ * Runtime/wake-specific Daytona classifier. Unlike `classifyDaytonaError`
+ * (which defaults unrecognized onboarding failures to `DAYTONA_SNAPSHOT_FAILED`),
+ * this returns `null` when `error` does not match a known Daytona error class
+ * so non-Daytona or generic provider errors keep their existing handling.
+ */
+export function classifyDaytonaRuntimeError(error: unknown): ClassifiedDaytonaError | null {
+  if (!error) return null;
+  if (isDaytonaStructuredError(error)) {
+    const retriable = error.code === 'DAYTONA_SNAPSHOT_FAILED' ? false : error.retriable;
+    return {
+      code: error.code,
+      message: error.message || DAYTONA_HUMAN_ERROR_COPY[error.code],
+      retriable,
+      reconnectRequired: error.reconnectRequired,
+      httpStatus: error.httpStatus,
+    };
+  }
+  if (isDaytonaNotConnectedError(error)) {
+    return buildClassified('DAYTONA_NOT_CONNECTED', error.message);
+  }
+  if (isDaytonaReconnectRequiredError(error)) {
+    return buildClassified('DAYTONA_RECONNECT_REQUIRED', error.message);
+  }
+
+  const errObj =
+    typeof error === 'object' && error !== null
+      ? (error as {
+          name?: unknown;
+          code?: unknown;
+          status?: number;
+          statusCode?: number;
+          response?: { status?: number };
+        })
+      : null;
+
+  if (errObj?.name === 'SnapshotStillBuildingError') {
+    return buildClassified('DAYTONA_SNAPSHOT_BUILDING');
+  }
+  if (isDaytonaErrorCode(errObj?.code)) {
+    const classified = buildClassified(errObj.code);
+    return errObj.code === 'DAYTONA_SNAPSHOT_FAILED'
+      ? { ...classified, retriable: false }
+      : classified;
+  }
+
+  const rawText =
+    error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  const lower = rawText.toLowerCase();
+  const status = errObj?.status ?? errObj?.statusCode ?? errObj?.response?.status ?? 0;
+
+  if (
+    lower.includes('snapshot not found') ||
+    lower.includes('invalid snapshot') ||
+    lower.includes('snapshot is not active') ||
+    lower.includes('snapshot is in error') ||
+    lower.includes('snapshot is in failed') ||
+    lower.includes('snapshot build failed') ||
+    lower.includes('daytona_snapshot_failed')
+  ) {
+    return { ...buildClassified('DAYTONA_SNAPSHOT_FAILED'), retriable: false };
+  }
+
+  const matchesExplicitDaytonaSignal =
+    isDaytonaErrorLike(error) ||
+    lower.includes('daytona_') ||
+    lower.includes('connect your daytona account') ||
+    lower.includes('snapshot is still building') ||
+    lower.includes('snapshot_still_building') ||
+    lower.includes('kortix_sandbox_ghcr_image') ||
+    lower.includes('default region') ||
+    lower.includes('defaultregion') ||
+    lower.includes('email_access_denied') ||
+    lower.includes('primary or work email') ||
+    lower.includes('verify your email') ||
+    lower.includes('organization is suspended') ||
+    lower.includes('workspace is suspended') ||
+    lower.includes('depleted credits') ||
+    lower.includes('out of credits') ||
+    lower.includes('insufficient credits') ||
+    lower.includes('credits depleted') ||
+    lower.includes('credits exhausted') ||
+    lower.includes('billing suspended') ||
+    lower.includes('invalid api key') ||
+    lower.includes('invalid credentials') ||
+    lower.includes('api key is revoked') ||
+    lower.includes('total memory limit exceeded') ||
+    lower.includes('total cpu limit exceeded') ||
+    lower.includes('total disk limit exceeded') ||
+    lower.includes('concurrency limit') ||
+    lower.includes('currently running tasks') ||
+    lower.includes('throttlerexception');
+
+  if (!matchesExplicitDaytonaSignal) return null;
+
+  const classified = classifyDaytonaError(status, rawText);
+  if (classified.code === 'DAYTONA_SNAPSHOT_FAILED') {
+    return { ...classified, retriable: false };
+  }
+  return classified;
+}
