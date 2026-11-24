@@ -3,6 +3,23 @@
 buildscript {
   ext {
     ndkVersion = "28.2.13676358"
+  } else if (project.name == "app") {
+    project.tasks.matching { it.name.startsWith("configureCMake") || it.name.startsWith("buildCMake") }.configureEach { appCmakeTask ->
+      appCmakeTask.doFirst {
+        rootProject.subprojects.each { sub ->
+          if (sub.name != "app") {
+            def genSrc = new File("E:/b/android/${sub.name}/generated")
+            def genDst = new File(sub.projectDir, "build/generated")
+            if (genSrc.exists()) {
+              project.copy {
+                from genSrc
+                into genDst
+              }
+            }
+          }
+        }
+      }
+    }
   }
   repositories {
     google()
@@ -21,8 +38,12 @@ allprojects {
     def shortKey = Integer.toHexString(project.name.hashCode())
     project.layout.buildDirectory.set(new File("E:/b/android/${project.name}"))
     project.plugins.withId("com.android.library") {
-      project.tasks.matching { it.name.startsWith("configureCMake") || it.name.startsWith("buildCMake") }.configureEach { cmakeTask ->
-        cmakeTask.doFirst {
+      project.tasks.matching {
+        it.name == "generateCodegenArtifactsFromSchema" ||
+        it.name.startsWith("configureCMake") ||
+        it.name.startsWith("buildCMake")
+      }.configureEach { t ->
+        t.doLast {
           def genSrc = new File("E:/b/android/${project.name}/generated")
           def genDst = new File(project.projectDir, "build/generated")
           if (genSrc.exists()) {
@@ -43,6 +64,23 @@ allprojects {
           externalNativeBuild {
             cmake {
               arguments "-DCMAKE_OBJECT_PATH_MAX=160"
+            }
+          }
+        }
+      }
+    }
+  } else if (project.name == "app") {
+    project.tasks.matching { it.name.startsWith("configureCMake") || it.name.startsWith("buildCMake") }.configureEach { appCmakeTask ->
+      appCmakeTask.doFirst {
+        rootProject.subprojects.each { sub ->
+          if (sub.name != "app") {
+            def genSrc = new File("E:/b/android/${sub.name}/generated")
+            def genDst = new File(sub.projectDir, "build/generated")
+            if (genSrc.exists()) {
+              project.copy {
+                from genSrc
+                into genDst
+              }
             }
           }
         }
