@@ -213,6 +213,8 @@ import { PermissionPromptCard } from './PermissionPromptCard';
 import { MarkdownActionsProvider } from '@/components/markdown/inline-code';
 import { ToolFilePreviewHost, useToolFilePreviewStore } from '@/components/session/tool/shared/navigation';
 import { SandboxPreviewSheet } from '@/components/session/SandboxPreviewSheet';
+import { ComputerDock } from '@/components/session/computer/ComputerDock';
+import { ComputerSheet } from '@/components/session/computer/ComputerSheet';
 import { ActivitySheetHost } from '@/components/session/turn/activity-sheet';
 import type { PermissionReply } from '@/components/session/tool/tool-part-renderer';
 import { ProjectHero } from '@/components/session/ProjectHero';
@@ -2447,6 +2449,14 @@ function SessionPageImpl({ sessionId, projectId, projectSessionId, onBack, onOpe
           }
         />
       )}
+      {!hasQuestion && (
+        <ComputerDock
+          sessionId={sessionId}
+          turns={turns}
+          isBusy={isBusy}
+          sandboxUrl={sandboxUrl}
+        />
+      )}
 
       {/* Bottom area — question prompt OR chat input, above the safe area. */}
         <View onLayout={handleBottomAreaLayout}>
@@ -2518,6 +2528,12 @@ function SessionPageImpl({ sessionId, projectId, projectSessionId, onBack, onOpe
       {/* Show/preview taps (ToolNavigation.openPreview): in-session over the
           thread, so a one-tap close returns to the same position (KRTX-602). */}
       <SandboxPreviewSheet />
+      <ComputerSheet
+        sessionId={sessionId}
+        turns={turns}
+        isBusy={isBusy}
+        sandboxUrl={sandboxUrl}
+      />
 
       {/* The activity summary rows' sheet (ActivityBurst) */}
       {/* Given the connector hand-off so a Connect inside it dismisses the
