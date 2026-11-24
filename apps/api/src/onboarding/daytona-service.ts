@@ -121,6 +121,17 @@ const flowTerminalErrorCache = new Map<
   string,
   { code: DaytonaOnboardingErrorCode; message: string; httpStatus: number; expiresAt: number }
 >();
+// replica-local: short-lived AES-256-GCM encrypted WorkOS JWT cache for flows awaiting Daytona email verification,
+// allowing the same single-use device_code approval to resume cleanly once the user confirms their email.
+const pendingEmailVerifyJwtCache = new Map<
+  string,
+  { encryptedApiKey: string; encryptionIv: string; encryptionTag: string; expiresAt: number }
+>();
+
+export function getDaytonaClaimTtlMs(): number {
+  const mins = Number((config as { KORTIX_DAYTONA_CLAIM_TTL_MINUTES?: number }).KORTIX_DAYTONA_CLAIM_TTL_MINUTES ?? 60);
+  return Math.max(5, Number.isFinite(mins) && mins > 0 ? mins : 60) * 60_000;
+}
 
 function lruSet<K, V>(map: Map<K, V>, key: K, val: V, maxSize: number): void {
   if (map.has(key)) map.delete(key);
@@ -1385,7 +1396,7 @@ export async function startDaytonaConnect(opts?: {
   }
 
   const flowId = randomUUID();
-  const expiresIn = Math.max(60, Math.min(600, Number(dc.expires_in ?? 300)));
+  const expiresIn = Math.max(60, Math.min(3_600, Number(dc.expires_in ?? 600)));
   const interval = Math.max(2, Number(dc.interval ?? 5));
   const verificationUriComplete =
     dc.verification_uri_complete ||
@@ -1752,6 +1763,9 @@ function toPollResultFromFlow(
   flow: typeof daytonaConnectFlows.$inferSelect,
 ): PollDaytonaConnectResult | null {
   if (flow.status === 'approved' && flow.claimToken && flow.daytonaOrgId) {
+    if (flow.expiresAt.getTime() <= Date.now()) {
+      return { status: 'expired' };
+    }
     return {
       status: 'approved',
       claimToken: flow.claimToken,
@@ -1865,46 +1879,37 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
     }
 
     const activeFlow = claimedForExchange[0]!;
-    let tokRes: Response;
-    try {
-      const oidc = await getDaytonaWorkosOidcConfig();
-      tokRes = await fetch(oidc.tokenEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Accept: 'application/json',
-        },
-        body: new URLSearchParams({
-          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-          device_code: activeFlow.deviceCode,
-          client_id: oidc.clientId,
-        }).toString(),
-        signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
-      });
-    } catch (networkErr) {
-      // Revert exchanging -> pending on transient network failure before token consumption.
-      await db
-        .update(daytonaConnectFlows)
-        .set({ status: 'pending', updatedAt: new Date() })
-        .where(
-          and(
-            eq(daytonaConnectFlows.flowId, flowId),
-            eq(daytonaConnectFlows.status, 'exchanging'),
-          ),
-        )
-        .catch(() => {});
-      throw networkErr;
+    const cachedVerifyJwt = pendingEmailVerifyJwtCache.get(flowId);
+    let jwt: string | undefined;
+    if (cachedVerifyJwt && cachedVerifyJwt.expiresAt > Date.now()) {
+      try {
+        jwt = decryptDaytonaApiKey(flowId, cachedVerifyJwt);
+      } catch {
+        pendingEmailVerifyJwtCache.delete(flowId);
+      }
+    } else if (cachedVerifyJwt) {
+      pendingEmailVerifyJwtCache.delete(flowId);
     }
 
-    const tokText = await tokRes.text();
-    if (!tokRes.ok) {
-      let errCode = '';
+    if (!jwt) {
+      let tokRes: Response;
       try {
-        errCode = String((JSON.parse(tokText) as { error?: string }).error || '');
-      } catch {
-        errCode = '';
-      }
-      if (errCode === 'authorization_pending' || errCode === 'slow_down') {
+        const oidc = await getDaytonaWorkosOidcConfig();
+        tokRes = await fetch(oidc.tokenEndpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: 'application/json',
+          },
+          body: new URLSearchParams({
+            grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+            device_code: activeFlow.deviceCode,
+            client_id: oidc.clientId,
+          }).toString(),
+          signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
+        });
+      } catch (networkErr) {
+        // Revert exchanging -> pending on transient network failure before token consumption.
         await db
           .update(daytonaConnectFlows)
           .set({ status: 'pending', updatedAt: new Date() })
@@ -1913,72 +1918,95 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
               eq(daytonaConnectFlows.flowId, flowId),
               eq(daytonaConnectFlows.status, 'exchanging'),
             ),
-          );
-        return errCode === 'slow_down' ? { status: 'pending', slowDown: true } : { status: 'pending' };
+          )
+          .catch(() => {});
+        throw networkErr;
       }
-      if (
-        errCode === 'expired_token' ||
-        errCode === 'access_denied' ||
-        errCode === 'invalid_grant'
-      ) {
-        // Conditional UPDATE: a late invalid_grant can NEVER overwrite 'approved' or 'claimed'.
-        const updated = await db
+
+      const tokText = await tokRes.text();
+      if (!tokRes.ok) {
+        let errCode = '';
+        try {
+          errCode = String((JSON.parse(tokText) as { error?: string }).error || '');
+        } catch {
+          errCode = '';
+        }
+        if (errCode === 'authorization_pending' || errCode === 'slow_down') {
+          await db
+            .update(daytonaConnectFlows)
+            .set({ status: 'pending', updatedAt: new Date() })
+            .where(
+              and(
+                eq(daytonaConnectFlows.flowId, flowId),
+                eq(daytonaConnectFlows.status, 'exchanging'),
+              ),
+            );
+          return errCode === 'slow_down' ? { status: 'pending', slowDown: true } : { status: 'pending' };
+        }
+        if (
+          errCode === 'expired_token' ||
+          errCode === 'access_denied' ||
+          errCode === 'invalid_grant'
+        ) {
+          // Conditional UPDATE: a late invalid_grant can NEVER overwrite 'approved' or 'claimed'.
+          const updated = await db
+            .update(daytonaConnectFlows)
+            .set({ status: 'expired', updatedAt: new Date() })
+            .where(
+              and(
+                eq(daytonaConnectFlows.flowId, flowId),
+                inArray(daytonaConnectFlows.status, ['pending', 'exchanging']),
+              ),
+            )
+            .returning();
+          if (updated.length > 0) {
+            return { status: 'expired' };
+          }
+          const reread = await db
+            .select()
+            .from(daytonaConnectFlows)
+            .where(eq(daytonaConnectFlows.flowId, flowId))
+            .limit(1);
+          if (reread[0]) {
+            const settled = toPollResultFromFlow(reread[0]);
+            if (settled) return settled;
+          }
+          return { status: 'expired' };
+        }
+        // Transient WorkOS error: revert exchanging -> pending so next poll retries.
+        await db
+          .update(daytonaConnectFlows)
+          .set({ status: 'pending', updatedAt: new Date() })
+          .where(
+            and(
+              eq(daytonaConnectFlows.flowId, flowId),
+              eq(daytonaConnectFlows.status, 'exchanging'),
+            ),
+          )
+          .catch(() => {});
+        const classified = classifyDaytonaError(tokRes.status, tokText);
+        throw new DaytonaStructuredError(classified.code, classified.message, classified.httpStatus);
+      }
+
+      const tok = JSON.parse(tokText) as { access_token?: string };
+      jwt = tok.access_token;
+      if (!jwt) {
+        await db
           .update(daytonaConnectFlows)
           .set({ status: 'expired', updatedAt: new Date() })
           .where(
             and(
               eq(daytonaConnectFlows.flowId, flowId),
-              inArray(daytonaConnectFlows.status, ['pending', 'exchanging']),
+              eq(daytonaConnectFlows.status, 'exchanging'),
             ),
           )
-          .returning();
-        if (updated.length > 0) {
-          return { status: 'expired' };
-        }
-        const reread = await db
-          .select()
-          .from(daytonaConnectFlows)
-          .where(eq(daytonaConnectFlows.flowId, flowId))
-          .limit(1);
-        if (reread[0]) {
-          const settled = toPollResultFromFlow(reread[0]);
-          if (settled) return settled;
-        }
-        return { status: 'expired' };
+          .catch(() => {});
+        throw new DaytonaStructuredError(
+          'DAYTONA_RECONNECT_REQUIRED',
+          'Daytona authorization completed without an access token. Please reconnect.',
+          502,
+        );
       }
-      // Transient WorkOS error: revert exchanging -> pending so next poll retries.
-      await db
-        .update(daytonaConnectFlows)
-        .set({ status: 'pending', updatedAt: new Date() })
-        .where(
-          and(
-            eq(daytonaConnectFlows.flowId, flowId),
-            eq(daytonaConnectFlows.status, 'exchanging'),
-          ),
-        )
-        .catch(() => {});
-      const classified = classifyDaytonaError(tokRes.status, tokText);
-      throw new DaytonaStructuredError(classified.code, classified.message, classified.httpStatus);
-    }
-
-    const tok = JSON.parse(tokText) as { access_token?: string };
-    const jwt = tok.access_token;
-    if (!jwt) {
-      await db
-        .update(daytonaConnectFlows)
-        .set({ status: 'expired', updatedAt: new Date() })
-        .where(
-          and(
-            eq(daytonaConnectFlows.flowId, flowId),
-            eq(daytonaConnectFlows.status, 'exchanging'),
-          ),
-        )
-        .catch(() => {});
-      throw new DaytonaStructuredError(
-        'DAYTONA_RECONNECT_REQUIRED',
-        'Daytona authorization completed without an access token. Please reconnect.',
-        502,
-      );
     }
 
     // WorkOS device_code is single-use: once we receive `jwt`, any subsequent call to
@@ -2020,6 +2048,7 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
       org = foundOrg;
       region = await ensureDefaultRegionOnOrg(jwt, org.id, org.defaultRegionId);
       mintedKey = await mintPermanentDaytonaKey(jwt, org.id, flowId);
+      pendingEmailVerifyJwtCache.delete(flowId);
     } catch (postJwtErr) {
       const structured =
         postJwtErr instanceof DaytonaStructuredError
@@ -2032,6 +2061,35 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
                 classified.httpStatus,
               );
             })();
+      if (structured.code === 'DAYTONA_EMAIL_UNVERIFIED') {
+        const encJwt = encryptDaytonaApiKey(flowId, jwt);
+        lruSet(
+          pendingEmailVerifyJwtCache,
+          flowId,
+          { ...encJwt, expiresAt: Date.now() + 20 * 60_000 },
+          500,
+        );
+        await db
+          .update(daytonaConnectFlows)
+          .set({
+            status: 'pending',
+            expiresAt: new Date(Math.max(activeFlow.expiresAt.getTime(), Date.now() + 20 * 60_000)),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(daytonaConnectFlows.flowId, flowId),
+              eq(daytonaConnectFlows.status, 'exchanging'),
+            ),
+          )
+          .catch(() => {});
+        return {
+          status: 'email_verification_required',
+          errorCode: 'DAYTONA_EMAIL_UNVERIFIED',
+          message: structured.message,
+        };
+      }
+      pendingEmailVerifyJwtCache.delete(flowId);
       lruSet(
         flowTerminalErrorCache,
         flowId,
@@ -2064,8 +2122,8 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
 
     const encrypted = encryptDaytonaApiKey(flowId, mintedKey.apiKey);
     const claimToken = randomBytes(32).toString('base64url');
-    // Extend TTL so the user has up to 15 minutes to finish Step 2 (Kortix sign-in).
-    const claimExpiresAt = new Date(Date.now() + 15 * 60_000);
+    // Extend TTL (default 60m via KORTIX_DAYTONA_CLAIM_TTL_MINUTES) so slow signups / email verification never lose their claim.
+    const claimExpiresAt = new Date(Date.now() + getDaytonaClaimTtlMs());
 
     const approvedRows = await db
       .update(daytonaConnectFlows)
@@ -2157,26 +2215,55 @@ export async function claimDaytonaConnect(
   claimToken: string,
 ): Promise<DaytonaOnboardingStatusResult> {
   const now = new Date();
+  const normalizedToken = claimToken.trim();
   const rows = await db
     .select()
     .from(daytonaConnectFlows)
-    .where(
-      and(
-        eq(daytonaConnectFlows.claimToken, claimToken),
-        eq(daytonaConnectFlows.status, 'approved'),
-        gt(daytonaConnectFlows.expiresAt, now),
-      ),
-    )
+    .where(eq(daytonaConnectFlows.claimToken, normalizedToken))
     .limit(1);
   const flow = rows[0];
+
+  // Idempotent re-claim for the SAME authenticated user (e.g. /auth/callback +
+  // post-auth DaytonaOnboardingGate or two open tabs racing the same claimToken),
+  // while strictly rejecting cross-user replay (single-use per user).
+  if (flow && flow.status === 'claimed') {
+    const existing = await db
+      .select({ daytonaOrgId: userDaytonaCredentials.daytonaOrgId })
+      .from(userDaytonaCredentials)
+      .where(eq(userDaytonaCredentials.userId, userId))
+      .limit(1);
+    if (existing[0] && existing[0].daytonaOrgId === flow.daytonaOrgId) {
+      return getDaytonaOnboardingStatus(userId);
+    }
+    throw new DaytonaStructuredError(
+      'DAYTONA_RECONNECT_REQUIRED',
+      'This Daytona approval link has already been used. Reconnect Daytona in one tap.',
+      409,
+      false,
+    );
+  }
+
   if (
     !flow ||
+    flow.status !== 'approved' ||
+    flow.expiresAt.getTime() <= now.getTime() ||
     !flow.encryptedApiKey ||
     !flow.encryptionIv ||
     !flow.encryptionTag ||
     !flow.daytonaOrgId
   ) {
-    throw new Error('Invalid or expired Daytona claim token. Please reconnect Daytona.');
+    // Returning / already-connected user carrying a stale pending-claim entry in
+    // browser storage must NEVER be prompted to connect Daytona a second time.
+    const currentStatus = await getDaytonaOnboardingStatus(userId).catch(() => null);
+    if (currentStatus?.connected && !currentStatus.reconnectRequired) {
+      return currentStatus;
+    }
+    throw new DaytonaStructuredError(
+      'DAYTONA_RECONNECT_REQUIRED',
+      'Your Daytona approval expired before sign-in finished. Tap Reconnect Daytona to continue.',
+      410,
+      false,
+    );
   }
 
   const plaintextApiKey = decryptDaytonaApiKey(flow.flowId, {
@@ -2194,6 +2281,7 @@ export async function claimDaytonaConnect(
 
   let previousOrgId: string | null = null;
   let orgSwitched = false;
+  let lostConcurrentSameUserRace = false;
 
   // Atomically claim the flow (clearing its temporary key copy) and bind to user_daytona_credentials.
   await db.transaction(async (tx) => {
@@ -2225,7 +2313,8 @@ export async function claimDaytonaConnect(
       )
       .returning({ flowId: daytonaConnectFlows.flowId });
     if (claimed.length === 0) {
-      throw new Error('Daytona claim token was already used.');
+      lostConcurrentSameUserRace = true;
+      return;
     }
 
     await tx
@@ -2273,6 +2362,23 @@ export async function claimDaytonaConnect(
         },
       });
   });
+
+  if (lostConcurrentSameUserRace) {
+    const afterRace = await db
+      .select({ daytonaOrgId: userDaytonaCredentials.daytonaOrgId })
+      .from(userDaytonaCredentials)
+      .where(eq(userDaytonaCredentials.userId, userId))
+      .limit(1);
+    if (afterRace[0] && afterRace[0].daytonaOrgId === flow.daytonaOrgId) {
+      return getDaytonaOnboardingStatus(userId);
+    }
+    throw new DaytonaStructuredError(
+      'DAYTONA_RECONNECT_REQUIRED',
+      'This Daytona approval link has already been used. Reconnect Daytona in one tap.',
+      409,
+      false,
+    );
+  }
 
   if (orgSwitched && previousOrgId) {
     logger.warn('[daytona-onboarding] user switched Daytona organization during claim', {

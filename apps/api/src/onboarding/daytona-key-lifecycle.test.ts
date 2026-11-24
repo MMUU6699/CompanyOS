@@ -119,7 +119,7 @@ function makeFakeDb() {
               const all = [...flowsTable.values()];
               const byFlowId = all.filter((f) => params.includes(f.flowId));
               if (byFlowId.length > 0) return byFlowId;
-              const byClaim = all.filter((f) => f.claimToken && params.includes(f.claimToken) && f.status === 'approved');
+              const byClaim = all.filter((f) => f.claimToken && params.includes(f.claimToken));
               if (byClaim.length > 0) return byClaim;
               const byIp = all.filter(
                 (f) =>
@@ -292,7 +292,7 @@ function makeFakeDb() {
           return {
             returning: async () => run(),
             then: (resolve: (v: any) => void) => resolve(run()),
-            catch: () => Promise.resolve([]),
+            catch: () => Promise.resolve(run()),
           };
         },
       }),
@@ -690,5 +690,189 @@ describe('Phase 2 key lifecycle & onboarding hardening', () => {
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('X-RateLimit-Limit')).toBe('30');
+  });
+
+  test('Milestone 3c: slow signup (>15m, <60m), idempotent same-user re-claim, cross-user single-use rejection, and already-connected user immunity', async () => {
+    const flowId = '11111111-1111-4111-8111-111111111111';
+    flowsTable.set(flowId, {
+      flowId,
+      deviceCode: 'dc-slow',
+      userCode: 'SLOW-0001',
+      verificationUriComplete: 'https://verify.example.test?user_code=SLOW-0001',
+      status: 'pending',
+      encryptedApiKey: null,
+      encryptionIv: null,
+      encryptionTag: null,
+      daytonaKeyName: null,
+      daytonaOrgId: null,
+      daytonaRegion: null,
+      claimToken: null,
+      clientIpHash: null,
+      terminalErrorCode: null,
+      terminalErrorMessage: null,
+      terminalErrorStatus: null,
+      expiresAt: new Date(Date.now() + 600_000),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    global.fetch = mock(async (url: string | URL) => {
+      const u = String(url);
+      if (u.endsWith('/config')) {
+        return new Response(
+          JSON.stringify({ oidc: { cli: { clientId: 'cid', issuer: 'https://oidc.example.test' } } }),
+          { status: 200 },
+        );
+      }
+      if (u.includes('.well-known/openid-configuration')) {
+        return new Response(
+          JSON.stringify({ device_authorization_endpoint: 'https://oidc.example.test/device', token_endpoint: 'https://oidc.example.test/token' }),
+          { status: 200 },
+        );
+      }
+      if (u.endsWith('/token')) {
+        return new Response(JSON.stringify({ access_token: 'jwt_000000000000' }), { status: 200 });
+      }
+      if (u.endsWith('/organizations')) {
+        return new Response(
+          JSON.stringify([{ id: 'org-slow-1', personal: true, defaultRegionId: 'eu', suspended: false }]),
+          { status: 200 },
+        );
+      }
+      if (u.includes('/api-keys')) {
+        return new Response(
+          JSON.stringify({ value: 'dtn_000000000000000000000000', name: 'kortix-app-flow-slow' }),
+          { status: 201 },
+        );
+      }
+      return new Response(JSON.stringify({ state: 'active' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const approved = await pollDaytonaConnect(flowId);
+    expect(approved.status).toBe('approved');
+    if (approved.status !== 'approved') throw new Error('expected approved');
+
+    // Verify >=256 bits of entropy (32 bytes base64url = 43 chars)
+    expect(approved.claimToken.length).toBeGreaterThanOrEqual(43);
+
+    // Verify server extended claim expiry beyond 15m (default 60m) so a 25-minute signup still succeeds
+    const storedFlow = flowsTable.get(flowId)!;
+    expect(storedFlow.expiresAt.getTime() - Date.now()).toBeGreaterThan(25 * 60_000);
+
+    // 1. First claim (e.g. inside /auth/callback during Google OAuth redirect) succeeds
+    const userA = '00000000-0000-4000-8000-0000000000a1';
+    const firstClaim = await claimDaytonaConnect(userA, approved.claimToken);
+    expect(firstClaim.connected).toBe(true);
+    expect(firstClaim.orgId).toBe('org-slow-1');
+
+    // 2. Second claim by SAME user (e.g. post-auth DaytonaOnboardingGate or second tab) is IDEMPOTENT (200)
+    const secondClaim = await claimDaytonaConnect(userA, approved.claimToken);
+    expect(secondClaim.connected).toBe(true);
+    expect(secondClaim.orgId).toBe('org-slow-1');
+
+    // 3. Replay by a DIFFERENT user is strictly rejected (409 single-use)
+    const userB = '00000000-0000-4000-8000-0000000000b2';
+    await expect(claimDaytonaConnect(userB, approved.claimToken)).rejects.toMatchObject({
+      httpStatus: 409,
+    });
+
+    // 4. Already-connected userA presenting a stale/expired claimToken is NEVER asked to sign in again
+    await expect(claimDaytonaConnect(userA, 'stale_expired_token_000000000000')).resolves.toMatchObject({
+      connected: true,
+      orgId: 'org-slow-1',
+    });
+
+    // 5. Unconnected userB presenting an expired claimToken gets explicit 410
+    await expect(claimDaytonaConnect(userB, 'stale_expired_token_000000000000')).rejects.toMatchObject({
+      httpStatus: 410,
+    });
+  });
+
+  test('Milestone 3c: email-verification path resumes same WorkOS approval once Daytona email is confirmed', async () => {
+    const flowId = '22222222-2222-4222-8222-222222222222';
+    flowsTable.set(flowId, {
+      flowId,
+      deviceCode: 'dc-email',
+      userCode: 'MAIL-0001',
+      verificationUriComplete: 'https://verify.example.test?user_code=MAIL-0001',
+      status: 'pending',
+      encryptedApiKey: null,
+      encryptionIv: null,
+      encryptionTag: null,
+      daytonaKeyName: null,
+      daytonaOrgId: null,
+      daytonaRegion: null,
+      claimToken: null,
+      clientIpHash: null,
+      terminalErrorCode: null,
+      terminalErrorMessage: null,
+      terminalErrorStatus: null,
+      expiresAt: new Date(Date.now() + 300_000),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    let emailVerified = false;
+    let workosTokenCalls = 0;
+
+    global.fetch = mock(async (url: string | URL) => {
+      const u = String(url);
+      if (u.endsWith('/config')) {
+        return new Response(
+          JSON.stringify({ oidc: { cli: { clientId: 'cid', issuer: 'https://oidc.example.test' } } }),
+          { status: 200 },
+        );
+      }
+      if (u.includes('.well-known/openid-configuration')) {
+        return new Response(
+          JSON.stringify({ device_authorization_endpoint: 'https://oidc.example.test/device', token_endpoint: 'https://oidc.example.test/token' }),
+          { status: 200 },
+        );
+      }
+      if (u.endsWith('/token')) {
+        workosTokenCalls += 1;
+        return new Response(JSON.stringify({ access_token: 'jwt_000000000001' }), { status: 200 });
+      }
+      if (u.endsWith('/organizations')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'org-mail-1',
+              personal: true,
+              defaultRegionId: 'eu',
+              suspended: !emailVerified,
+              suspensionReason: emailVerified ? null : 'Please verify your email address',
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+      if (u.includes('/api-keys')) {
+        return new Response(
+          JSON.stringify({ value: 'dtn_000000000000000000000001', name: 'kortix-app-flow-mail' }),
+          { status: 201 },
+        );
+      }
+      return new Response(JSON.stringify({ state: 'active' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    // Poll 1: user approved WorkOS before confirming Daytona email -> returns `email_verification_required` (not expired!)
+    const poll1 = await pollDaytonaConnect(flowId);
+    expect(poll1).toMatchObject({
+      status: 'email_verification_required',
+      errorCode: 'DAYTONA_EMAIL_UNVERIFIED',
+    });
+    expect(flowsTable.get(flowId)?.status).toBe('pending');
+    expect(workosTokenCalls).toBe(1);
+
+    // User clicks verification link in Daytona email -> Poll 2 ("Continue") succeeds without calling WorkOS /token again!
+    emailVerified = true;
+    const poll2 = await pollDaytonaConnect(flowId);
+    expect(poll2).toMatchObject({
+      status: 'approved',
+      orgId: 'org-mail-1',
+      region: 'eu',
+    });
+    expect(workosTokenCalls).toBe(1);
   });
 });

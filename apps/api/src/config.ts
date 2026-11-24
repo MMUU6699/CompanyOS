@@ -710,7 +710,9 @@ const envSchema = z.object({
   // Optional TTL in days for newly minted per-user Daytona API keys (0 = no expiry).
   KORTIX_DAYTONA_KEY_TTL_DAYS: optInt(0),
   // Maximum concurrent active Daytona Device-Flow onboarding sessions per client IP.
-  KORTIX_DAYTONA_MAX_ACTIVE_FLOWS_PER_IP: optInt(5),
+  KORTIX_DAYTONA_MAX_ACTIVE_FLOWS_PER_IP: optInt(15),
+  // TTL in minutes for an approved Daytona claimToken while the user finishes Kortix sign-in / email verification.
+  KORTIX_DAYTONA_CLAIM_TTL_MINUTES: optInt(60),
   // Org-level Daytona webhook signing secret (Svix `whsec_…`). When set, the
   // /v1/billing/webhooks/daytona endpoint closes compute billing the instant a
   // box stops; the reaper sweep is the backstop, so this is optional.

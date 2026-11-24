@@ -79,9 +79,16 @@ import {
   DaytonaStepCompleteBanner,
 } from '@/features/auth/daytona-step';
 import {
+  PENDING_CLAIM_KEY,
+  PENDING_MANUAL_KEY,
+  claimDaytonaConnect,
+  clearAllPendingDaytonaState,
   clearPendingDaytonaClaim,
   clearPendingManualDaytonaKey,
   hasPendingDaytonaOnboarding,
+  readPendingDaytonaClaim,
+  readPendingManualDaytonaKey,
+  saveManualDaytonaKey,
 } from '@/lib/onboarding/daytona-client';
 
 const GoogleSignIn = lazy(() => import('@/features/auth/google-signin'));
@@ -268,10 +275,20 @@ function AuthCardForm({
   });
 
   useEffect(() => {
-    if (hasPendingDaytonaOnboarding()) {
-      setDaytonaDone(true);
-      setStep((current) => (current === 'daytona' ? 'entry' : current));
-    }
+    const syncPendingDaytona = () => {
+      if (hasPendingDaytonaOnboarding()) {
+        setDaytonaDone(true);
+        setStep((current) => (current === 'daytona' ? 'entry' : current));
+      }
+    };
+    syncPendingDaytona();
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key === PENDING_CLAIM_KEY || e.key === PENDING_MANUAL_KEY) {
+        syncPendingDaytona();
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
   }, []);
   const [email, setEmail] = useState('');
   // What the flow knows about the address by the time the password step shows:
@@ -420,6 +437,23 @@ function AuthCardForm({
         invalidateTokenCache();
       } catch {
         // Server cookies still carry the session; fall through to redirect.
+      }
+      // Claim any pending Step 1 Daytona token right before navigating to /workspaces
+      // using the freshly minted accessToken so DaytonaOnboardingGate opens straight into the app.
+      const pendingClaim = readPendingDaytonaClaim();
+      const pendingManual = readPendingManualDaytonaKey();
+      if (pendingClaim) {
+        await claimDaytonaConnect(pendingClaim.claimToken, tokens.accessToken)
+          .then(() => clearAllPendingDaytonaState())
+          .catch((err) => {
+            if ((err as { terminal?: boolean })?.terminal) {
+              clearPendingDaytonaClaim();
+            }
+          });
+      } else if (pendingManual) {
+        await saveManualDaytonaKey(pendingManual, undefined, tokens.accessToken)
+          .then(() => clearAllPendingDaytonaState())
+          .catch(() => {});
       }
     }
 

@@ -184,6 +184,7 @@ export async function GET(request: NextRequest) {
 
       let finalDestination = next;
       let shouldClearReferralCookie = false;
+      let shouldClearDaytonaClaimCookie = false;
       let authEvent = 'login';
       let authMethod = 'email';
 
@@ -258,6 +259,49 @@ export async function GET(request: NextRequest) {
         const { data: sessionData } = await supabase.auth.getSession();
         const accessToken = sessionData?.session?.access_token;
 
+        // Claim any Step 1 Daytona onboarding token right inside the post-auth callback
+        // BEFORE redirecting to `/workspaces`, so `DaytonaOnboardingGate` sees `connected: true`
+        // immediately on frame 0 without ever prompting the user a second time.
+        const rawClaimCookie = request.cookies.get('kortix_daytona_claim')?.value;
+        if (rawClaimCookie && backendUrl && accessToken) {
+          let decodedClaim = '';
+          try {
+            decodedClaim = decodeURIComponent(rawClaimCookie).trim();
+          } catch {
+            decodedClaim = rawClaimCookie.trim();
+          }
+          if (decodedClaim.length >= 16) {
+            const normalizedBackend = backendUrl.replace(/\/+$/, '');
+            const claimEndpoint = normalizedBackend.endsWith('/v1')
+              ? `${normalizedBackend}/onboarding/daytona/claim`
+              : `${normalizedBackend}/v1/onboarding/daytona/claim`;
+            try {
+              const claimRes = await fetch(claimEndpoint, {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  Accept: 'application/json',
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ claimToken: decodedClaim }),
+                signal: AbortSignal.timeout(6_000),
+              });
+              if (
+                claimRes.ok ||
+                claimRes.status === 400 ||
+                claimRes.status === 409 ||
+                claimRes.status === 410
+              ) {
+                shouldClearDaytonaClaimCookie = true;
+              }
+            } catch {
+              // Keep cookie intact so client-side DaytonaOnboardingGate retries cleanly.
+            }
+          } else {
+            shouldClearDaytonaClaimCookie = true;
+          }
+        }
+
         const billingEnabled = runtimeEnv.BILLING_ENABLED;
         // Skip the billing-aware landing for invited users: a returnUrl pointing
         // at /invites/:id must be honored verbatim so they reach the accept/decline
@@ -324,6 +368,9 @@ export async function GET(request: NextRequest) {
       // Clear referral cookie if it was processed
       if (shouldClearReferralCookie) {
         response.cookies.set('pending-referral-code', '', { maxAge: 0, path: '/' });
+      }
+      if (shouldClearDaytonaClaimCookie) {
+        response.cookies.set('kortix_daytona_claim', '', { maxAge: 0, path: '/' });
       }
 
       return response;

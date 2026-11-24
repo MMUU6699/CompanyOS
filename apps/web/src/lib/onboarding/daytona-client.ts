@@ -64,11 +64,26 @@ export interface StoredActiveFlow extends StartDaytonaConnectResponse {
 
 export const DAYTONA_STATUS_QUERY_KEY = ['onboarding', 'daytona-status'] as const;
 export const DAYTONA_RECONNECT_EVENT = 'kortix:daytona-reconnect-required';
+export const DAYTONA_CLAIM_COOKIE = 'kortix_daytona_claim';
 
-const PENDING_FLOW_KEY = 'kortix:daytona:active-flow';
-const PENDING_CLAIM_KEY = 'kortix:daytona:pending-claim';
-const PENDING_MANUAL_KEY = 'kortix:daytona:pending-manual-key';
-const PENDING_CLAIM_TTL_MS = 20 * 60_000;
+export const PENDING_FLOW_KEY = 'kortix:daytona:active-flow';
+export const PENDING_CLAIM_KEY = 'kortix:daytona:pending-claim';
+export const PENDING_MANUAL_KEY = 'kortix:daytona:pending-manual-key';
+export const PENDING_CLAIM_TTL_MS = 60 * 60_000;
+
+export class DaytonaClaimError extends Error {
+  readonly status: number;
+  readonly terminal: boolean;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'DaytonaClaimError';
+    this.status = status;
+    // 400 / 409 (already used by another user) / 410 (expired) are terminal for this claimToken;
+    // 401 (auth token still hydrating) and 5xx / network (0) are transient and must NOT wipe storage.
+    this.terminal = status === 400 || status === 409 || status === 410;
+  }
+}
 
 interface StoredPendingValue {
   value: string;
@@ -157,10 +172,10 @@ async function parseErrorMessage(res: Response, fallback: string): Promise<strin
   return fallback;
 }
 
-async function authHeaders(): Promise<Record<string, string>> {
-  const token = await getSupabaseAccessToken();
+async function authHeaders(accessTokenOverride?: string | null): Promise<Record<string, string>> {
+  const token = accessTokenOverride?.trim() || (await getSupabaseAccessToken());
   if (!token) {
-    throw new Error('Authentication required. Please sign in again.');
+    throw new DaytonaClaimError('Authentication required. Please sign in again.', 401);
   }
   return {
     Authorization: `Bearer ${token}`,
@@ -220,15 +235,30 @@ export async function pollDaytonaConnect(flowId: string): Promise<PollDaytonaCon
   return (await res.json()) as PollDaytonaConnectResponse;
 }
 
-export async function claimDaytonaConnect(claimToken: string): Promise<DaytonaOnboardingStatus> {
-  const headers = await authHeaders();
-  const res = await fetch(`${onboardingBaseUrl()}/claim`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ claimToken }),
-  });
+export async function claimDaytonaConnect(
+  claimToken: string,
+  accessTokenOverride?: string | null,
+): Promise<DaytonaOnboardingStatus> {
+  const headers = await authHeaders(accessTokenOverride);
+  let res: Response;
+  try {
+    res = await fetch(`${onboardingBaseUrl()}/claim`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ claimToken }),
+    });
+  } catch {
+    throw new DaytonaClaimError(
+      'Could not reach Kortix to finish linking Daytona. Retrying automatically…',
+      0,
+    );
+  }
   if (!res.ok) {
-    throw new Error(await parseErrorMessage(res, 'Could not link your Daytona workspace. Please reconnect Daytona.'));
+    const fallback =
+      res.status === 410
+        ? 'Your Daytona approval expired before sign-in finished. Reconnect Daytona in one tap.'
+        : 'Could not link your Daytona workspace. Please reconnect Daytona.';
+    throw new DaytonaClaimError(await parseErrorMessage(res, fallback), res.status);
   }
   return (await res.json()) as DaytonaOnboardingStatus;
 }
@@ -260,8 +290,9 @@ export async function retryDaytonaSnapshot(): Promise<DaytonaOnboardingStatus> {
 export async function saveManualDaytonaKey(
   apiKey: string,
   region?: string,
+  accessTokenOverride?: string | null,
 ): Promise<DaytonaOnboardingStatus> {
-  const headers = await authHeaders();
+  const headers = await authHeaders(accessTokenOverride);
   const res = await fetch(`${onboardingBaseUrl()}/manual-key`, {
     method: 'POST',
     headers,
@@ -286,21 +317,52 @@ export async function disconnectDaytona(): Promise<void> {
 
 // ─── Cross-redirect Flow & Step 1 -> Step 2 Handoff Storage ──────────────────
 
-export function stashActiveDaytonaFlow(flow: StartDaytonaConnectResponse): void {
-  if (typeof window === 'undefined') return;
+function writeClaimCookie(claimToken: string | null): void {
+  if (typeof document === 'undefined') return;
   try {
-    const record: StoredActiveFlow = {
-      ...flow,
-      expiresAt: Date.now() + Math.max(flow.expiresIn || 300, 60) * 1000,
-    };
-    window.sessionStorage.setItem(PENDING_FLOW_KEY, JSON.stringify(record));
+    const secure = typeof window !== 'undefined' && window.location.protocol === 'https:' ? '; Secure' : '';
+    if (!claimToken) {
+      document.cookie = `${DAYTONA_CLAIM_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax${secure}`;
+      return;
+    }
+    const maxAgeSec = Math.floor(PENDING_CLAIM_TTL_MS / 1000);
+    document.cookie = `${DAYTONA_CLAIM_COOKIE}=${encodeURIComponent(claimToken)}; Path=/; Max-Age=${maxAgeSec}; SameSite=Lax${secure}`;
   } catch {}
 }
 
-export function readActiveDaytonaFlow(): StoredActiveFlow | null {
-  if (typeof window === 'undefined') return null;
+function readClaimCookie(): string | null {
+  if (typeof document === 'undefined' || !document.cookie) return null;
   try {
-    const raw = window.sessionStorage.getItem(PENDING_FLOW_KEY);
+    const prefix = `${DAYTONA_CLAIM_COOKIE}=`;
+    for (const part of document.cookie.split(';')) {
+      const trimmed = part.trim();
+      if (trimmed.startsWith(prefix)) {
+        const val = decodeURIComponent(trimmed.slice(prefix.length)).trim();
+        return val.length >= 16 ? val : null;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+export function stashActiveDaytonaFlow(flow: StartDaytonaConnectResponse): void {
+  if (typeof window === 'undefined') return;
+  const payload = JSON.stringify({
+    ...flow,
+    expiresAt: Date.now() + Math.max(flow.expiresIn || 600, 60) * 1000,
+  } satisfies StoredActiveFlow);
+  try {
+    window.sessionStorage.setItem(PENDING_FLOW_KEY, payload);
+  } catch {}
+  try {
+    window.localStorage.setItem(PENDING_FLOW_KEY, payload);
+  } catch {}
+}
+
+function readFlowFromStorage(storage: Storage | null): StoredActiveFlow | null {
+  if (!storage) return null;
+  try {
+    const raw = storage.getItem(PENDING_FLOW_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredActiveFlow>;
     if (
@@ -310,7 +372,7 @@ export function readActiveDaytonaFlow(): StoredActiveFlow | null {
       typeof parsed.expiresAt !== 'number' ||
       parsed.expiresAt <= Date.now() + 5_000
     ) {
-      window.sessionStorage.removeItem(PENDING_FLOW_KEY);
+      storage.removeItem(PENDING_FLOW_KEY);
       return null;
     }
     return parsed as StoredActiveFlow;
@@ -319,10 +381,18 @@ export function readActiveDaytonaFlow(): StoredActiveFlow | null {
   }
 }
 
+export function readActiveDaytonaFlow(): StoredActiveFlow | null {
+  if (typeof window === 'undefined') return null;
+  return readFlowFromStorage(window.sessionStorage) ?? readFlowFromStorage(window.localStorage);
+}
+
 export function clearActiveDaytonaFlow(): void {
   if (typeof window === 'undefined') return;
   try {
     window.sessionStorage.removeItem(PENDING_FLOW_KEY);
+  } catch {}
+  try {
+    window.localStorage.removeItem(PENDING_FLOW_KEY);
   } catch {}
 }
 
@@ -366,6 +436,7 @@ export function stashPendingDaytonaClaim(claimToken: string, meta?: { orgId?: st
   try {
     window.localStorage.setItem(PENDING_CLAIM_KEY, payload);
   } catch {}
+  writeClaimCookie(claimToken);
 }
 
 export function readPendingDaytonaClaim(): { claimToken: string; orgId?: string; region?: string } | null {
@@ -373,8 +444,14 @@ export function readPendingDaytonaClaim(): { claimToken: string; orgId?: string;
   const found =
     readStoredValue(window.sessionStorage, PENDING_CLAIM_KEY) ??
     readStoredValue(window.localStorage, PENDING_CLAIM_KEY);
-  if (!found) return null;
-  return { claimToken: found.value, orgId: found.orgId, region: found.region };
+  if (found) {
+    return { claimToken: found.value, orgId: found.orgId, region: found.region };
+  }
+  const cookieToken = readClaimCookie();
+  if (cookieToken) {
+    return { claimToken: cookieToken };
+  }
+  return null;
 }
 
 export function clearPendingDaytonaClaim(): void {
@@ -385,6 +462,7 @@ export function clearPendingDaytonaClaim(): void {
   try {
     window.localStorage.removeItem(PENDING_CLAIM_KEY);
   } catch {}
+  writeClaimCookie(null);
 }
 
 export function stashPendingManualDaytonaKey(apiKey: string): void {

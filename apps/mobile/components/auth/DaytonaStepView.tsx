@@ -80,6 +80,7 @@ export interface MobileOnboardingCopy {
   expiredError: string;
   genericError: string;
   emailVerifyHint: string;
+  emailVerifyContinue: string;
 }
 
 const EN_MOBILE_COPY: MobileOnboardingCopy = {
@@ -124,6 +125,7 @@ const EN_MOBILE_COPY: MobileOnboardingCopy = {
   expiredError: 'The Daytona confirmation code expired. Tap below to generate a new code.',
   genericError: 'Could not reach Daytona right now. Please try again.',
   emailVerifyHint: 'Confirm your email address in Daytona, then return here to continue.',
+  emailVerifyContinue: "I've verified my email — Continue",
 };
 
 const AR_MOBILE_COPY: MobileOnboardingCopy = {
@@ -168,6 +170,7 @@ const AR_MOBILE_COPY: MobileOnboardingCopy = {
   expiredError: 'انتهت صلاحية رمز التأكيد. اضغط أدناه لإنشاء رمز جديد.',
   genericError: 'تعذّر الاتصال بـ Daytona الآن. يرجى المحاولة مرة أخرى.',
   emailVerifyHint: 'أكّد بريدك الإلكتروني في Daytona ثم عد إلى هنا للمتابعة.',
+  emailVerifyContinue: 'أكّدت بريدي الإلكتروني — متابعة',
 };
 
 export function useMobileOnboardingLocale() {
@@ -291,6 +294,7 @@ export function DaytonaStepView({
   const [phase, setPhase] = React.useState<'idle' | 'starting' | 'polling' | 'claiming' | 'expired'>('idle');
   const [infoMessage, setInfoMessage] = React.useState<string | null>(null);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+  const [awaitingEmailVerify, setAwaitingEmailVerify] = React.useState(false);
 
   const [showManual, setShowManual] = React.useState(false);
   const [manualKey, setManualKey] = React.useState('');
@@ -338,6 +342,7 @@ export function DaytonaStepView({
         }
 
         if (result.status === 'email_verification_required') {
+          setAwaitingEmailVerify(true);
           setInfoMessage(sanitizeUiErrorMessage(result.message, copy.emailVerifyHint));
           pollTimerRef.current = setTimeout(() => {
             void runPollOnce(flowId);
@@ -346,6 +351,7 @@ export function DaytonaStepView({
         }
 
         if (result.status === 'approved') {
+          setAwaitingEmailVerify(false);
           stopPolling();
           await clearActiveDaytonaFlow();
           haptics.success();
@@ -625,6 +631,24 @@ export function DaytonaStepView({
             style={{ textAlign: isAr ? 'right' : 'left' }}>
             {copy.approveHint}
           </Text>
+          {awaitingEmailVerify ? (
+            <Button
+              variant="default"
+              size="default"
+              className="rounded-full"
+              onPress={() => {
+                haptics.tap();
+                setErrorMessage(null);
+                if (pollTimerRef.current) {
+                  clearTimeout(pollTimerRef.current);
+                  pollTimerRef.current = null;
+                }
+                void runPollOnce(flow.flowId);
+              }}>
+              <Icon as={CheckIcon} size={16} color={colors.primaryForeground} />
+              <Text>{copy.emailVerifyContinue}</Text>
+            </Button>
+          ) : null}
           <View className="flex-row gap-2">
             <Button
               variant="outline"

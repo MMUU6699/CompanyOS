@@ -40,12 +40,16 @@ import {
 } from '@/lib/icons';
 import {
   DAYTONA_STATUS_QUERY_KEY,
+  DaytonaClaimError,
   type DaytonaOnboardingErrorCode,
   type DaytonaOnboardingStatus,
   claimDaytonaConnect,
+  clearActiveDaytonaFlow,
   clearAllPendingDaytonaState,
   fetchDaytonaOnboardingStatus,
   inferDaytonaErrorCode,
+  pollDaytonaConnect,
+  readActiveDaytonaFlow,
   readPendingDaytonaClaim,
   readPendingManualDaytonaKey,
   retryDaytonaSnapshot,
@@ -238,7 +242,8 @@ export function DaytonaOnboardingGate() {
     const run = async () => {
       const pendingClaim = await readPendingDaytonaClaim();
       const pendingManualKey = readPendingManualDaytonaKey();
-      if (!pendingClaim && !pendingManualKey) {
+      const activeFlow = !pendingClaim && !pendingManualKey ? await readActiveDaytonaFlow() : null;
+      if (!pendingClaim && !pendingManualKey && !activeFlow) {
         if (!cancelled) setClaimState('done');
         return;
       }
@@ -249,18 +254,32 @@ export function DaytonaOnboardingGate() {
       }
 
       try {
-        let status: DaytonaOnboardingStatus;
+        let status: DaytonaOnboardingStatus | null = null;
         if (pendingClaim) {
           status = await claimDaytonaConnect(pendingClaim.claimToken);
-        } else {
-          status = await saveManualDaytonaKey(pendingManualKey!);
+        } else if (pendingManualKey) {
+          status = await saveManualDaytonaKey(pendingManualKey);
+        } else if (activeFlow) {
+          const polled = await pollDaytonaConnect(activeFlow.flowId).catch(() => null);
+          if (polled?.status === 'approved') {
+            status = await claimDaytonaConnect(polled.claimToken);
+          } else if (polled?.status === 'expired' || polled?.status === 'claimed') {
+            await clearActiveDaytonaFlow();
+          }
         }
-        await clearAllPendingDaytonaState();
-        if (cancelled) return;
-        queryClient.setQueryData(DAYTONA_STATUS_QUERY_KEY, status);
-        setForcedReconnect(false);
+        if (status) {
+          await clearAllPendingDaytonaState();
+          if (cancelled) return;
+          queryClient.setQueryData(DAYTONA_STATUS_QUERY_KEY, status);
+          setForcedReconnect(false);
+        }
       } catch (err) {
-        await clearAllPendingDaytonaState();
+        const isTerminal = err instanceof DaytonaClaimError ? err.terminal : true;
+        if (isTerminal) {
+          await clearAllPendingDaytonaState();
+        } else {
+          claimAttemptedUserRef.current = null;
+        }
         if (cancelled) return;
         setClaimError(
           sanitizeUiErrorMessage(

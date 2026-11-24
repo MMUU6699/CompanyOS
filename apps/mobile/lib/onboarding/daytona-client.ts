@@ -65,7 +65,19 @@ export const DAYTONA_STATUS_QUERY_KEY = ['onboarding', 'daytona-status'] as cons
 
 const ACTIVE_FLOW_STORAGE_KEY = 'kortix:daytona:active-flow';
 const PENDING_CLAIM_STORAGE_KEY = 'kortix:daytona:pending-claim';
-const PENDING_CLAIM_TTL_MS = 20 * 60_000;
+export const PENDING_CLAIM_TTL_MS = 60 * 60_000;
+
+export class DaytonaClaimError extends Error {
+  readonly status: number;
+  readonly terminal: boolean;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'DaytonaClaimError';
+    this.status = status;
+    this.terminal = status === 400 || status === 409 || status === 410;
+  }
+}
 
 // In-memory only for a pre-auth manual API key (never written to disk plaintext).
 let pendingManualApiKeyMemory: { value: string; storedAt: number } | null = null;
@@ -191,10 +203,10 @@ async function parseErrorMessage(res: Response, fallback: string): Promise<strin
   return fallback;
 }
 
-async function authHeaders(): Promise<Record<string, string>> {
-  const token = await kortixGetToken();
+async function authHeaders(accessTokenOverride?: string | null): Promise<Record<string, string>> {
+  const token = accessTokenOverride?.trim() || (await kortixGetToken());
   if (!token) {
-    throw new Error('Authentication required. Please sign in again.');
+    throw new DaytonaClaimError('Authentication required. Please sign in again.', 401);
   }
   return {
     Authorization: `Bearer ${token}`,
@@ -227,17 +239,30 @@ export async function pollDaytonaConnect(flowId: string): Promise<PollDaytonaCon
   return (await res.json()) as PollDaytonaConnectResponse;
 }
 
-export async function claimDaytonaConnect(claimToken: string): Promise<DaytonaOnboardingStatus> {
-  const headers = await authHeaders();
-  const res = await fetch(`${onboardingBaseUrl()}/claim`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ claimToken }),
-  });
-  if (!res.ok) {
-    throw new Error(
-      await parseErrorMessage(res, 'Could not link your Daytona workspace. Please reconnect Daytona.'),
+export async function claimDaytonaConnect(
+  claimToken: string,
+  accessTokenOverride?: string | null,
+): Promise<DaytonaOnboardingStatus> {
+  const headers = await authHeaders(accessTokenOverride);
+  let res: Response;
+  try {
+    res = await fetch(`${onboardingBaseUrl()}/claim`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ claimToken }),
+    });
+  } catch {
+    throw new DaytonaClaimError(
+      'Could not reach Kortix to finish linking Daytona. Retrying automatically…',
+      0,
     );
+  }
+  if (!res.ok) {
+    const fallback =
+      res.status === 410
+        ? 'Your Daytona approval expired before sign-in finished. Tap Reconnect Daytona to continue.'
+        : 'Could not link your Daytona workspace. Please reconnect Daytona.';
+    throw new DaytonaClaimError(await parseErrorMessage(res, fallback), res.status);
   }
   return (await res.json()) as DaytonaOnboardingStatus;
 }

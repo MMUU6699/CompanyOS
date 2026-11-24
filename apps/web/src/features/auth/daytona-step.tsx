@@ -44,6 +44,9 @@ import { performSignOut } from '@/lib/auth/perform-sign-out';
 import {
   DAYTONA_RECONNECT_EVENT,
   DAYTONA_STATUS_QUERY_KEY,
+  DaytonaClaimError,
+  PENDING_CLAIM_KEY,
+  PENDING_FLOW_KEY,
   type DaytonaOnboardingErrorCode,
   type DaytonaOnboardingStatus,
   type StartDaytonaConnectResponse,
@@ -121,6 +124,8 @@ interface OnboardingCopy {
   bgActivating: string;
   retryShort: string;
   reconnectShort: string;
+  emailVerifyContinue: string;
+  newSignupHint: string;
 }
 
 const EN_COPY: OnboardingCopy = {
@@ -196,6 +201,9 @@ const EN_COPY: OnboardingCopy = {
   bgActivating: 'Activating your cloud computer in the background…',
   retryShort: 'Retry',
   reconnectShort: 'Reconnect',
+  emailVerifyContinue: "I've verified my email — Continue",
+  newSignupHint:
+    'Created a new Daytona account or verified your email? Click Open Daytona again to return to the approval prompt.',
 };
 
 const AR_COPY: OnboardingCopy = {
@@ -271,6 +279,9 @@ const AR_COPY: OnboardingCopy = {
   bgActivating: 'جارٍ تفعيل حاسوبك السحابي في الخلفية…',
   retryShort: 'إعادة المحاولة',
   reconnectShort: 'إعادة الربط',
+  emailVerifyContinue: 'أكّدت بريدي الإلكتروني — متابعة',
+  newSignupHint:
+    'أنشأت حساب Daytona جديداً أو أكّدت بريدك؟ اضغط فتح Daytona مجدداً للعودة إلى شاشة الموافقة.',
 };
 
 function useOnboardingCopy(): { copy: OnboardingCopy; isRtl: boolean } {
@@ -402,6 +413,7 @@ export function DaytonaStepCard({
   const [phase, setPhase] = useState<'idle' | 'starting' | 'polling' | 'claiming' | 'expired'>('idle');
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [awaitingEmailVerify, setAwaitingEmailVerify] = useState(false);
 
   const [showManual, setShowManual] = useState(false);
   const [manualKey, setManualKey] = useState('');
@@ -410,6 +422,8 @@ export function DaytonaStepCard({
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollIntervalMsRef = useRef<number>(5_000);
   const activeFlowIdRef = useRef<string | null>(null);
+  const prefetchedFlowRef = useRef<{ flow: StartDaytonaConnectResponse; readyUntil: number } | null>(null);
+  const prefetchInFlightRef = useRef<Promise<StartDaytonaConnectResponse> | null>(null);
 
   const stopPolling = useCallback(() => {
     activeFlowIdRef.current = null;
@@ -447,12 +461,14 @@ export function DaytonaStepCard({
           }
 
           if (result.status === 'email_verification_required') {
+            setAwaitingEmailVerify(true);
             setInfoMessage(sanitizeUiErrorMessage(result.message, copy.errorBodyEmail));
             schedulePoll(flowId, Math.max(pollIntervalMsRef.current, 6_000));
             return;
           }
 
           if (result.status === 'approved') {
+            setAwaitingEmailVerify(false);
             stopPolling();
             clearActiveDaytonaFlow();
             if (mode === 'pre-auth') {
@@ -505,59 +521,112 @@ export function DaytonaStepCard({
     [copy, mode, onComplete, stopPolling],
   );
 
-  // Resume an in-progress Device Flow if the browser reloaded while the user authorized Daytona.
+  // Resume an in-progress Device Flow across reloads / browser restarts, and sync cross-tab approvals.
   useEffect(() => {
     const saved = readActiveDaytonaFlow();
-    if (!saved) return;
-    setFlow(saved);
-    setPhase('polling');
-    pollIntervalMsRef.current = Math.max((saved.interval || 5) * 1000, 4_000);
-    activeFlowIdRef.current = saved.flowId;
-    schedulePoll(saved.flowId, 1_500);
-  }, [schedulePoll]);
+    if (saved) {
+      setFlow(saved);
+      setPhase('polling');
+      pollIntervalMsRef.current = Math.max((saved.interval || 5) * 1000, 4_000);
+      activeFlowIdRef.current = saved.flowId;
+      schedulePoll(saved.flowId, 1_500);
+    }
 
-  const handleStartDaytona = async () => {
+    const onStorage = (e: StorageEvent) => {
+      if (mode === 'pre-auth' && e.key === PENDING_CLAIM_KEY && e.newValue) {
+        const claimed = readPendingDaytonaClaim();
+        if (claimed) {
+          stopPolling();
+          onComplete({
+            method: 'device',
+            orgId: claimed.orgId,
+            region: claimed.region,
+          });
+        }
+      } else if (e.key === PENDING_FLOW_KEY && e.newValue && !activeFlowIdRef.current) {
+        const nextSaved = readActiveDaytonaFlow();
+        if (nextSaved) {
+          setFlow(nextSaved);
+          setPhase('polling');
+          pollIntervalMsRef.current = Math.max((nextSaved.interval || 5) * 1000, 4_000);
+          activeFlowIdRef.current = nextSaved.flowId;
+          schedulePoll(nextSaved.flowId, 2_000);
+        }
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [mode, onComplete, schedulePoll, stopPolling]);
+
+  const warmDaytonaFlow = useCallback((): Promise<StartDaytonaConnectResponse> => {
+    const cached = prefetchedFlowRef.current;
+    if (cached && cached.readyUntil > Date.now()) {
+      return Promise.resolve(cached.flow);
+    }
+    if (prefetchInFlightRef.current) {
+      return prefetchInFlightRef.current;
+    }
+    const req = startDaytonaConnect()
+      .then((started) => {
+        prefetchedFlowRef.current = {
+          flow: started,
+          readyUntil: Date.now() + Math.max((started.expiresIn || 600) - 60, 60) * 1000,
+        };
+        return started;
+      })
+      .finally(() => {
+        prefetchInFlightRef.current = null;
+      });
+    prefetchInFlightRef.current = req;
+    return req;
+  }, []);
+
+  const handleStartDaytona = async (forceFresh = false) => {
     stopPolling();
     clearActiveDaytonaFlow();
     setErrorMessage(null);
     setInfoMessage(null);
+    setAwaitingEmailVerify(false);
+
+    if (forceFresh) {
+      prefetchedFlowRef.current = null;
+      prefetchInFlightRef.current = null;
+    }
+
+    // Open `verificationUriComplete` synchronously when hover/focus already warmed `/start`
+    // — zero `about:blank` tab ever (`window.open('', '_blank')` is never called).
+    const cached = !forceFresh ? prefetchedFlowRef.current : null;
+    if (cached && cached.readyUntil > Date.now()) {
+      prefetchedFlowRef.current = null;
+      const started = cached.flow;
+      stashActiveDaytonaFlow(started);
+      setFlow(started);
+      setPhase('polling');
+      pollIntervalMsRef.current = Math.max((started.interval || 5) * 1000, 4_000);
+      activeFlowIdRef.current = started.flowId;
+      if (typeof window !== 'undefined') {
+        window.open(started.verificationUriComplete, '_blank', 'noopener,noreferrer');
+      }
+      schedulePoll(started.flowId, pollIntervalMsRef.current);
+      return;
+    }
+
     setPhase('starting');
-
-    // Open a controllable blank handle WITHOUT `noopener,noreferrer` inside the click gesture:
-    // passing `noopener` returns `null` per HTML spec and strands an orphan `about:blank` tab.
-    // Navigate via `location.replace(...)` FIRST, then sever `popup.opener`.
-    const popup = typeof window !== 'undefined' ? window.open('', '_blank') : null;
-
     try {
-      const started = await startDaytonaConnect();
+      const started = await warmDaytonaFlow();
+      prefetchedFlowRef.current = null;
       stashActiveDaytonaFlow(started);
       setFlow(started);
       setPhase('polling');
       pollIntervalMsRef.current = Math.max((started.interval || 5) * 1000, 4_000);
       activeFlowIdRef.current = started.flowId;
 
-      if (popup && !popup.closed) {
-        try {
-          popup.location.replace(started.verificationUriComplete);
-        } catch {
-          popup.location.href = started.verificationUriComplete;
-        }
-        try {
-          popup.opener = null;
-        } catch {
-          // Ignore cross-browser readonly opener guards.
-        }
-      } else if (typeof window !== 'undefined') {
+      if (typeof window !== 'undefined') {
         window.open(started.verificationUriComplete, '_blank', 'noopener,noreferrer');
       }
 
       schedulePoll(started.flowId, pollIntervalMsRef.current);
     } catch (err) {
-      if (popup && !popup.closed) {
-        try {
-          popup.close();
-        } catch {}
-      }
       setPhase('idle');
       setErrorMessage(
         sanitizeUiErrorMessage(
@@ -662,19 +731,36 @@ export function DaytonaStepCard({
               </div>
             </div>
             <p className="text-muted-foreground text-xs leading-relaxed">{copy.approveHint}</p>
+            <p className="text-muted-foreground text-[11px] leading-relaxed">{copy.newSignupHint}</p>
             <div className="flex flex-wrap items-center gap-2">
+              {awaitingEmailVerify ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => {
+                    setErrorMessage(null);
+                    schedulePoll(flow.flowId, 100);
+                  }}
+                >
+                  <CheckIcon className="size-3.5 shrink-0" />
+                  {copy.emailVerifyContinue}
+                </Button>
+              ) : null}
               <Button
-                type="button"
+                asChild
                 variant="outline"
                 size="sm"
-                onClick={() =>
-                  window.open(flow.verificationUriComplete, '_blank', 'noopener,noreferrer')
-                }
               >
-                <ArrowSquareOutIcon className="size-3.5 shrink-0" />
-                {copy.openDaytonaAgain}
+                <a
+                  href={flow.verificationUriComplete}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <ArrowSquareOutIcon className="size-3.5 shrink-0" />
+                  {copy.openDaytonaAgain}
+                </a>
               </Button>
-              <Button type="button" variant="ghost" size="sm" onClick={() => void handleStartDaytona()}>
+              <Button type="button" variant="ghost" size="sm" onClick={() => void handleStartDaytona(true)}>
                 <ArrowClockwiseIcon className="size-3.5 shrink-0" />
                 {copy.newCodeShort}
               </Button>
@@ -686,6 +772,12 @@ export function DaytonaStepCard({
             size="lg"
             className="w-full"
             disabled={busy}
+            onPointerEnter={() => {
+              void warmDaytonaFlow().catch(() => {});
+            }}
+            onFocus={() => {
+              void warmDaytonaFlow().catch(() => {});
+            }}
             onClick={() => void handleStartDaytona()}
           >
             {phase === 'starting' || phase === 'claiming' ? (
@@ -830,6 +922,7 @@ export function DaytonaOnboardingGate({ children }: { children?: React.ReactNode
   const claimAttemptedForUserRef = useRef<string | null>(null);
 
   const userId = session?.user?.id ?? null;
+  const sessionAccessToken = session?.access_token ?? null;
 
   useEffect(() => {
     const onReconnectRequired = () => {
@@ -841,13 +934,14 @@ export function DaytonaOnboardingGate({ children }: { children?: React.ReactNode
   }, [queryClient]);
 
   useEffect(() => {
-    if (authLoading || !userId) return;
+    if (authLoading || !userId || !sessionAccessToken) return;
     if (claimAttemptedForUserRef.current === userId) return;
     claimAttemptedForUserRef.current = userId;
 
     const pendingClaim = readPendingDaytonaClaim();
     const pendingManualKey = readPendingManualDaytonaKey();
-    if (!pendingClaim && !pendingManualKey) {
+    const activeFlow = !pendingClaim && !pendingManualKey ? readActiveDaytonaFlow() : null;
+    if (!pendingClaim && !pendingManualKey && !activeFlow) {
       setClaimState('done');
       return;
     }
@@ -858,18 +952,33 @@ export function DaytonaOnboardingGate({ children }: { children?: React.ReactNode
 
     const run = async () => {
       try {
-        let status: DaytonaOnboardingStatus;
+        let status: DaytonaOnboardingStatus | null = null;
         if (pendingClaim) {
-          status = await claimDaytonaConnect(pendingClaim.claimToken);
-        } else {
-          status = await saveManualDaytonaKey(pendingManualKey!);
+          status = await claimDaytonaConnect(pendingClaim.claimToken, sessionAccessToken);
+        } else if (pendingManualKey) {
+          status = await saveManualDaytonaKey(pendingManualKey, undefined, sessionAccessToken);
+        } else if (activeFlow) {
+          const polled = await pollDaytonaConnect(activeFlow.flowId).catch(() => null);
+          if (polled?.status === 'approved') {
+            status = await claimDaytonaConnect(polled.claimToken, sessionAccessToken);
+          } else if (polled?.status === 'expired' || polled?.status === 'claimed') {
+            clearActiveDaytonaFlow();
+          }
         }
-        clearAllPendingDaytonaState();
-        if (cancelled) return;
-        queryClient.setQueryData(DAYTONA_STATUS_QUERY_KEY, status);
-        setForcedReconnect(false);
+        if (status) {
+          clearAllPendingDaytonaState();
+          if (cancelled) return;
+          queryClient.setQueryData(DAYTONA_STATUS_QUERY_KEY, status);
+          setForcedReconnect(false);
+        }
       } catch (err) {
-        clearAllPendingDaytonaState();
+        const isTerminal = err instanceof DaytonaClaimError ? err.terminal : true;
+        if (isTerminal) {
+          clearAllPendingDaytonaState();
+        } else {
+          // Transient error: allow a retry on next effect cycle instead of wiping a valid claimToken.
+          claimAttemptedForUserRef.current = null;
+        }
         if (cancelled) return;
         setClaimError(
           sanitizeUiErrorMessage(
@@ -886,7 +995,7 @@ export function DaytonaOnboardingGate({ children }: { children?: React.ReactNode
     return () => {
       cancelled = true;
     };
-  }, [authLoading, copy.errorBodyReconnect, queryClient, userId]);
+  }, [authLoading, copy.errorBodyReconnect, queryClient, sessionAccessToken, userId]);
 
   const statusQuery = useQuery({
     queryKey: DAYTONA_STATUS_QUERY_KEY,
