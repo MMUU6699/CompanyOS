@@ -1307,15 +1307,6 @@
     }
   },
   "src/platform/providers/daytona.ts": {
-    "kortix-api/projects-surface": {
-      "count": 1
-    },
-    "kortix-api/replica-local": {
-      "count": 1
-    },
-    "no-console": {
-      "count": 3
-    },
     "no-restricted-properties": {
       "count": 1
     }

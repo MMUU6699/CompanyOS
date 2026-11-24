@@ -44,6 +44,16 @@ const OWNER_FIXABLE_SOURCES = [
   'requires a paid plan',
   // The manifest: 'workspace mode "read" requires restricted workspace artifacts'
   'workspace mode ".*" requires',
+  // Per-user Daytona workspace refusals only the owner can fix (revoked key,
+  // disconnected Daytona account, suspended org / depleted credits).
+  'DAYTONA_RECONNECT_REQUIRED',
+  'DAYTONA_NOT_CONNECTED',
+  'DAYTONA_ORG_SUSPENDED',
+  'reconnect daytona',
+  'connect your daytona account',
+  'organization is suspended',
+  'depleted credits',
+  'invalid credentials',
 ];
 const OWNER_FIXABLE = new RegExp(OWNER_FIXABLE_SOURCES.join('|'), 'i');
 const OWNER_FIXABLE_SQL = OWNER_FIXABLE_SOURCES.join('|');

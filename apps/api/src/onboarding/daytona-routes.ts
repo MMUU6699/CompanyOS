@@ -115,31 +115,20 @@ function formatRouteError(
       },
     };
   }
-  // Never leak raw upstream JSON strings or HTTP error bodies into UI error copy.
-  if (rawMessage.includes('{') || rawMessage.includes('HTTP ')) {
-    logger.warn('[daytona-routes] sanitized upstream Daytona error', {
-      fallbackError,
-      rawMessage: rawMessage.slice(0, 300),
-    });
-    const classified = classifyDaytonaError(err, rawMessage);
-    return {
-      status: normalizeStatus(classified.httpStatus, fallbackStatus),
-      body: {
-        error: fallbackError,
-        code: classified.code,
-        message: classified.message,
-        reconnectRequired: classified.reconnectRequired,
-        retriable: classified.retriable,
-      },
-    };
-  }
+  // Never leak raw upstream JSON strings, stack text, or HTTP error bodies into UI error copy.
   const classified = classifyDaytonaError(err, rawMessage);
+  logger.warn('[daytona-routes] returning sanitized Daytona error', {
+    fallbackError,
+    code: classified.code,
+    httpStatus: classified.httpStatus,
+    rawMessage: rawMessage.slice(0, 300),
+  });
   return {
     status: normalizeStatus(classified.httpStatus, fallbackStatus),
     body: {
       error: fallbackError,
       code: classified.code,
-      message: rawMessage || classified.message,
+      message: classified.message,
       reconnectRequired: classified.reconnectRequired,
       retriable: classified.retriable,
     },

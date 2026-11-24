@@ -20,6 +20,10 @@ import { sessionSandboxes } from '@kortix/db';
 import { db, hasDatabase } from '../shared/db';
 import { logger } from '../lib/logger';
 import { DaytonaAllSandboxesBusyError } from '../shared/daytona-errors';
+import {
+  STOPPED_SANDBOX_CLEARED_KEYS,
+  transitionSandbox,
+} from './session-lifecycle/status-transitions';
 import type {
   DaytonaStartedSandboxSummary,
   DaytonaStoppedSandboxSummary,
@@ -102,10 +106,17 @@ async function waitUntilState(
 async function markStoppedInDb(externalIds: string[]): Promise<void> {
   if (!hasDatabase || externalIds.length === 0) return;
   try {
-    await db
-      .update(sessionSandboxes)
-      .set({ status: 'stopped', updatedAt: new Date() })
+    const rows = await db
+      .select({ sandboxId: sessionSandboxes.sandboxId })
+      .from(sessionSandboxes)
       .where(inArray(sessionSandboxes.externalId, externalIds));
+    const at = new Date();
+    for (const row of rows) {
+      await transitionSandbox('stop', row.sandboxId, {
+        at,
+        metadata: { strip: STOPPED_SANDBOX_CLEARED_KEYS },
+      });
+    }
   } catch (err) {
     logger.warn('[daytona-slot-manager] failed to mark evicted sandboxes stopped in DB', {
       error: err instanceof Error ? err.message : String(err),

@@ -23,6 +23,11 @@ describe('isTerminalFireFailure: a scheduled fire no retry can fix ends on its f
       'INVALID_SESSION_MODEL',
       'reminder_session_gone',
       'repository_disconnected',
+      'DAYTONA_ORG_SUSPENDED',
+      'DAYTONA_RECONNECT_REQUIRED',
+      'DAYTONA_NOT_CONNECTED',
+      'DAYTONA_REGION_REQUIRED',
+      'DAYTONA_EMAIL_UNVERIFIED',
     ]) {
       expect(isTerminalFireFailure({ retryable: true, errorCode })).toBe(true);
     }

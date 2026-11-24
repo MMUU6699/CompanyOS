@@ -1,4 +1,5 @@
 import { REPOSITORY_DISCONNECTED_CODE } from '../../shared/repository-health';
+import { isNonRetriableDaytonaCode } from '../../shared/daytona-errors';
 
 /**
  * Whether a failed scheduled fire is final on its first attempt. True when no
@@ -32,5 +33,9 @@ export function isTerminalFireFailure(
     // The fire already paused the reminder; a retry cannot bring the session back.
     || result.errorCode === 'reminder_session_gone'
     // No retry reaches a repository until a person reconnects GitHub.
-    || result.errorCode === REPOSITORY_DISCONNECTED_CODE;
+    || result.errorCode === REPOSITORY_DISCONNECTED_CODE
+    // Per-user Daytona account errors (suspended org / depleted credits,
+    // revoked API key, not connected, missing region, unverified email) require
+    // owner action and cannot succeed by retrying the trigger fire.
+    || isNonRetriableDaytonaCode(result.errorCode);
 }

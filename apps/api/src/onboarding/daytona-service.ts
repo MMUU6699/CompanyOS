@@ -1466,10 +1466,9 @@ export async function resolvePreferredSharedRegion(preferred?: string | null): P
       }
     }
   } catch (err) {
-    console.warn(
-      '[daytona-onboarding] GET /shared-regions failed, falling back to default:',
-      err instanceof Error ? err.message : String(err),
-    );
+    logger.warn('[daytona-onboarding] GET /shared-regions failed, falling back to default', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
   return desired || 'eu';
 }
@@ -1503,18 +1502,19 @@ export async function ensureDefaultRegionOnOrg(
   );
   if (!patchRes.ok) {
     const errBody = await patchRes.text().catch(() => '');
-    console.error(
-      `[daytona-onboarding] PATCH /organizations/${orgId}/default-region (${chosen}) failed (HTTP ${patchRes.status}): ${errBody.slice(0, 300)}`,
-    );
+    logger.error('[daytona-onboarding] PATCH /organizations/:orgId/default-region failed', {
+      orgId,
+      region: chosen,
+      status: patchRes.status,
+      detail: errBody.slice(0, 300),
+    });
     throw new DaytonaStructuredError(
       'DAYTONA_REGION_REQUIRED',
       HUMAN_ERROR_COPY.DAYTONA_REGION_REQUIRED,
-      502,
+      428,
     );
   }
-  console.log(
-    `[daytona-onboarding] set defaultRegionId=${chosen} on org ${orgId} via PATCH /default-region`,
-  );
+  logger.info('[daytona-onboarding] set defaultRegionId on org', { orgId, region: chosen });
   return chosen;
 }
 
@@ -1544,24 +1544,29 @@ export async function fetchOrganizationsWithPropagationRetry(
     });
     if (!orgsRes.ok) {
       const errBody = await orgsRes.text().catch(() => '');
-      console.warn(
-        `[daytona-onboarding] GET /organizations failed (HTTP ${orgsRes.status}, attempt ${attempt}/${maxAttempts}): ${errBody.slice(0, 200)}`,
-      );
+      logger.warn('[daytona-onboarding] GET /organizations failed', {
+        status: orgsRes.status,
+        attempt,
+        maxAttempts,
+        detail: errBody.slice(0, 200),
+      });
       if (attempt < maxAttempts && (orgsRes.status >= 500 || orgsRes.status === 429)) {
         await new Promise((r) => setTimeout(r, delayMs));
         continue;
       }
       const classified = classifyDaytonaError(orgsRes.status, errBody);
-      throw new DaytonaStructuredError(classified.code, classified.message, 502);
+      throw new DaytonaStructuredError(classified.code, classified.message, classified.httpStatus);
     }
     const orgs = (await orgsRes.json()) as DaytonaOrgSummary[];
     if (Array.isArray(orgs) && orgs.length > 0) {
       return orgs;
     }
     if (attempt < maxAttempts) {
-      console.log(
-        `[daytona-onboarding] GET /organizations returned empty array for new account (attempt ${attempt}/${maxAttempts}); waiting ${delayMs}ms for personal org provisioning`,
-      );
+      logger.info('[daytona-onboarding] waiting for new personal org provisioning', {
+        attempt,
+        maxAttempts,
+        delayMs,
+      });
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
