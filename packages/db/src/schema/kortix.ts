@@ -10625,12 +10625,28 @@ export const userDaytonaCredentials = kortixSchema.table('user_daytona_credentia
   encryptionTag: text('encryption_tag').notNull(),
   daytonaOrgId: text('daytona_org_id').notNull(),
   daytonaRegion: text('daytona_region').default('eu').notNull(),
+  /** Exact Daytona API key name minted/registered for this row (never evicted while referenced). */
+  daytonaKeyName: text('daytona_key_name'),
+  /** Optional API key expiration timestamp returned/configured at mint time. */
+  daytonaKeyExpiresAt: timestamp('daytona_key_expires_at', { withTimezone: true }),
+  /** Previous Daytona org id when credentials were overwritten by a different org. */
+  previousDaytonaOrgId: text('previous_daytona_org_id'),
+  /** Timestamp when previousDaytonaOrgId was superseded. */
+  previousOrgReplacedAt: timestamp('previous_org_replaced_at', { withTimezone: true }),
   snapshotName: text('snapshot_name'),
   snapshotStatus: text('snapshot_status')
     .$type<'pending' | 'pulling' | 'active' | 'inactive' | 'failed'>()
     .default('pending')
     .notNull(),
   snapshotError: text('snapshot_error'),
+  /** Bounded snapshot retry counter (reset to 0 when snapshot reaches active or on explicit retry). */
+  snapshotAttempts: integer('snapshot_attempts').default(0),
+  /** Earliest timestamp for the next automatic snapshot retry (exponential backoff). */
+  snapshotNextRetryAt: timestamp('snapshot_next_retry_at', { withTimezone: true }),
+  /** Optional per-user concurrency override/learned cap (NULL = derive from Daytona org limits). */
+  maxRunningSandboxes: integer('max_running_sandboxes'),
+  /** Optional per-user non-archived disk slot cap (NULL = derive from Daytona org limits). */
+  maxNonArchivedSandboxes: integer('max_non_archived_sandboxes'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
@@ -10647,15 +10663,23 @@ export const daytonaConnectFlows = kortixSchema.table('daytona_connect_flows', {
   userCode: text('user_code').notNull(),
   verificationUriComplete: text('verification_uri_complete').notNull(),
   status: text('status')
-    .$type<'pending' | 'approved' | 'claimed' | 'expired'>()
+    .$type<'pending' | 'exchanging' | 'approved' | 'claimed' | 'expired'>()
     .default('pending')
     .notNull(),
   encryptedApiKey: text('encrypted_api_key'),
   encryptionIv: text('encryption_iv'),
   encryptionTag: text('encryption_tag'),
+  /** Daytona API key name minted during this flow (revoked by reaper if unclaimed after TTL). */
+  daytonaKeyName: text('daytona_key_name'),
   daytonaOrgId: text('daytona_org_id'),
   daytonaRegion: text('daytona_region'),
   claimToken: text('claim_token'),
+  /** Salted SHA-256 hash of client IP used to cap concurrent active flows per IP. */
+  clientIpHash: text('client_ip_hash'),
+  /** Persisted terminal error code/message/status when post-JWT onboarding fails. */
+  terminalErrorCode: text('terminal_error_code'),
+  terminalErrorMessage: text('terminal_error_message'),
+  terminalErrorStatus: integer('terminal_error_status'),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
@@ -10666,6 +10690,6 @@ export const daytonaConnectFlows = kortixSchema.table('daytona_connect_flows', {
   index('idx_daytona_connect_flows_expires_at').on(table.expiresAt),
   check(
     'daytona_connect_flows_status_check',
-    sql`${table.status} IN ('pending', 'approved', 'claimed', 'expired')`,
+    sql`${table.status} IN ('pending', 'exchanging', 'approved', 'claimed', 'expired')`,
   ),
 ]).enableRLS();
