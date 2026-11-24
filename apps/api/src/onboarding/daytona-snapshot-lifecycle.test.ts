@@ -10,8 +10,8 @@ const mockConfig = {
   KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK: false,
   DAYTONA_SERVER_URL: 'https://daytona.example.test/api',
   DAYTONA_TARGET: 'eu',
-  API_KEY_SECRET: 'test-api-key-secret-for-unit-tests-0123456789',
-  DAYTONA_CREDENTIALS_ENCRYPTION_KEY: 'test-daytona-enc-key-0123456789abcdef',
+  API_KEY_SECRET: '00000000000000000000000000000000',
+  DAYTONA_CREDENTIALS_ENCRYPTION_KEY: '00000000000000000000000000000000',
   KORTIX_SANDBOX_GHCR_IMAGE: 'ghcr.io/mmuu6699/kortix-sandbox:20261121-da3f5cdd',
   KORTIX_DAYTONA_KEY_TTL_DAYS: 0,
   KORTIX_DAYTONA_MAX_ACTIVE_FLOWS_PER_IP: 5,
@@ -213,13 +213,13 @@ describe('Phase 3 snapshot lifecycle', () => {
     // Pre-claim starts with userId: undefined; user-flight-a joins the same flight.
     const [r1, r2] = await Promise.all([
       ensureUserSnapshot({
-        apiKey: 'dtn_preclaim_key_1234567890',
+        apiKey: 'mock_preclaim',
         daytonaOrgId: 'org-shared-snap',
         daytonaRegion: 'eu',
       }),
       ensureUserSnapshot({
         userId: 'user-flight-a',
-        apiKey: 'dtn_key_user-flight-a_1234567890',
+        apiKey: 'mock_flight_a',
         daytonaOrgId: 'org-shared-snap',
         daytonaRegion: 'eu',
       }),

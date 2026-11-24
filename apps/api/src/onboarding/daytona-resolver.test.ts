@@ -9,8 +9,8 @@ const mockConfig = {
   KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK: false,
   DAYTONA_SERVER_URL: 'https://daytona.example.test/api',
   DAYTONA_TARGET: 'eu',
-  API_KEY_SECRET: 'test-api-key-secret-for-unit-tests-0123456789',
-  DAYTONA_CREDENTIALS_ENCRYPTION_KEY: 'test-daytona-enc-key-0123456789abcdef',
+  API_KEY_SECRET: '00000000000000000000000000000000',
+  DAYTONA_CREDENTIALS_ENCRYPTION_KEY: '00000000000000000000000000000000',
 };
 
 const warnLogs: Array<{ msg: string; meta?: Record<string, unknown> }> = [];

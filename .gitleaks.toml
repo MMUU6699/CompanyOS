@@ -155,3 +155,16 @@ paths = [
 regexes = [
   '''^phc_[A-Za-z0-9]{20,64}$''',
 ]
+
+[[allowlists]]
+description = "Historical false-positive in Daytona onboarding unit tests (replaced with zero-entropy fixtures). gitleaks walks PR/push commit history, so this narrow allowlist scopes only to those three test files and those two synthetic placeholder strings."
+condition = "AND"
+paths = [
+  '''^apps/api/src/onboarding/daytona-snapshot-lifecycle\.test\.ts$''',
+  '''^apps/api/src/onboarding/daytona-resolver\.test\.ts$''',
+  '''^apps/api/src/onboarding/daytona-key-lifecycle\.test\.ts$''',
+]
+regexes = [
+  '''^test-daytona-enc-key-0123456789abcdef$''',
+  '''^dtn_preclaim_key_1234567890$''',
+]
