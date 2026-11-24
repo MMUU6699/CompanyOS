@@ -29,10 +29,9 @@ export function getProvider(name: ProviderName): SandboxProvider {
       provider = new PlatinumProvider();
       break;
     case 'daytona':
-      // Legacy fallback provider: removal scheduled, kept for existing sessions.
-      if (!config.DAYTONA_API_KEY) {
-        throw new Error('Daytona (legacy fallback) provider requires DAYTONA_API_KEY to be set.');
-      }
+      // Per-user Daytona credentials are resolved per session from
+      // kortix.user_daytona_credentials; a platform DAYTONA_API_KEY is not
+      // required to instantiate DaytonaProvider.
       provider = new DaytonaProvider();
       break;
     default: {

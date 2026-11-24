@@ -2,14 +2,35 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Daytona } from '@daytonaio/sdk';
 import { and, eq, gt, lt, sql } from 'drizzle-orm';
 import {
+  accountMembers,
   daytonaConnectFlows,
   sandboxes,
   sessionSandboxes,
   userDaytonaCredentials,
 } from '@kortix/db';
 import { config } from '../config';
+import { logger } from '../lib/logger';
 import { db, hasDatabase } from '../shared/db';
 import { configuredTimeoutMs } from '../shared/with-timeout';
+import {
+  DAYTONA_HUMAN_ERROR_COPY as HUMAN_ERROR_COPY,
+  DaytonaAllSandboxesBusyError,
+  DaytonaNotConnectedError,
+  DaytonaOrgSuspendedError,
+  DaytonaReconnectRequiredError,
+  DaytonaStructuredError,
+  classifyDaytonaError,
+  humanMessageForDaytonaCode,
+  isDaytonaAllSandboxesBusyError,
+  isDaytonaNotConnectedError,
+  isDaytonaOrgSuspendedError,
+  isDaytonaReconnectRequiredError,
+  isDaytonaStructuredError,
+  sanitizeStoredDaytonaError,
+  type ClassifiedDaytonaError,
+  type DaytonaErrorCode,
+  type DaytonaOnboardingErrorCode,
+} from '../shared/daytona-errors';
 import {
   DEFAULT_CPU,
   DEFAULT_DISK_GB,
@@ -26,223 +47,24 @@ import {
 
 export type UserDaytonaSnapshotStatus = 'pending' | 'pulling' | 'active' | 'inactive' | 'failed';
 
-export type DaytonaOnboardingErrorCode =
-  | 'DAYTONA_REGION_REQUIRED'
-  | 'DAYTONA_EMAIL_UNVERIFIED'
-  | 'DAYTONA_QUOTA_EXCEEDED'
-  | 'DAYTONA_SNAPSHOT_FAILED'
-  | 'DAYTONA_RECONNECT_REQUIRED'
-  | 'DAYTONA_TIMEOUT';
-
-export interface ClassifiedDaytonaError {
-  code: DaytonaOnboardingErrorCode;
-  message: string;
-  reconnectRequired: boolean;
-}
-
-const HUMAN_ERROR_COPY: Record<DaytonaOnboardingErrorCode, string> = {
-  DAYTONA_REGION_REQUIRED:
-    'Your Daytona workspace needs a default region selected. Reconnect Daytona and Kortix will configure it automatically.',
-  DAYTONA_EMAIL_UNVERIFIED:
-    'Please verify your email address in Daytona, then retry setup.',
-  DAYTONA_QUOTA_EXCEEDED:
-    'Your Daytona workspace ran out of free credits or reached its resource limit. Add credits in Daytona, free up space, or connect a different Daytona account in Settings → Cloud computer.',
-  DAYTONA_SNAPSHOT_FAILED:
-    'We could not prepare your private cloud computer image right now. Tap retry or reconnect Daytona.',
-  DAYTONA_RECONNECT_REQUIRED:
-    'Your Daytona connection expired or was revoked. Reconnect Daytona to continue.',
-  DAYTONA_TIMEOUT:
-    'Daytona took too long to respond. Tap retry to check again.',
+export {
+  DaytonaAllSandboxesBusyError,
+  DaytonaNotConnectedError,
+  DaytonaOrgSuspendedError,
+  DaytonaReconnectRequiredError,
+  DaytonaStructuredError,
+  classifyDaytonaError,
+  humanMessageForDaytonaCode,
+  isDaytonaAllSandboxesBusyError,
+  isDaytonaNotConnectedError,
+  isDaytonaOrgSuspendedError,
+  isDaytonaReconnectRequiredError,
+  isDaytonaStructuredError,
+  sanitizeStoredDaytonaError,
+  type ClassifiedDaytonaError,
+  type DaytonaErrorCode,
+  type DaytonaOnboardingErrorCode,
 };
-
-export function humanMessageForDaytonaCode(code: DaytonaOnboardingErrorCode): string {
-  return HUMAN_ERROR_COPY[code];
-}
-
-export function classifyDaytonaError(
-  statusOrErr: number | unknown,
-  rawBodyOrMessage = '',
-): ClassifiedDaytonaError {
-  const status =
-    typeof statusOrErr === 'number'
-      ? statusOrErr
-      : ((statusOrErr as { status?: number; statusCode?: number; response?: { status?: number } })
-          ?.status ??
-        (statusOrErr as { statusCode?: number })?.statusCode ??
-        (statusOrErr as { response?: { status?: number } })?.response?.status ??
-        0);
-  const rawText =
-    rawBodyOrMessage ||
-    (statusOrErr instanceof Error ? statusOrErr.message : typeof statusOrErr === 'string' ? statusOrErr : '');
-  const lower = rawText.toLowerCase();
-
-  if (
-    lower.includes('default region') ||
-    lower.includes('defaultregion') ||
-    lower.includes('daytona_region_required')
-  ) {
-    return {
-      code: 'DAYTONA_REGION_REQUIRED',
-      message: HUMAN_ERROR_COPY.DAYTONA_REGION_REQUIRED,
-      reconnectRequired: true,
-    };
-  }
-
-  if (
-    lower.includes('email_access_denied') ||
-    lower.includes('primary or work email')
-  ) {
-    return {
-      code: 'DAYTONA_EMAIL_UNVERIFIED',
-      message:
-        'Daytona requires a primary or work email address (temporary or aliased emails are blocked). Sign in to Daytona with a primary email, Google, or GitHub account, then tap New code.',
-      reconnectRequired: false,
-    };
-  }
-
-  if (
-    lower.includes('depleted credits') ||
-    lower.includes('out of credits') ||
-    lower.includes('insufficient credits') ||
-    lower.includes('credits depleted') ||
-    lower.includes('credits exhausted') ||
-    lower.includes('billing suspended')
-  ) {
-    return {
-      code: 'DAYTONA_QUOTA_EXCEEDED',
-      message: HUMAN_ERROR_COPY.DAYTONA_QUOTA_EXCEEDED,
-      reconnectRequired: false,
-    };
-  }
-
-  if (
-    lower.includes('daytona_email_unverified') ||
-    lower.includes('verify your email') ||
-    lower.includes('email verification') ||
-    lower.includes('suspended')
-  ) {
-    return {
-      code: 'DAYTONA_EMAIL_UNVERIFIED',
-      message: HUMAN_ERROR_COPY.DAYTONA_EMAIL_UNVERIFIED,
-      reconnectRequired: false,
-    };
-  }
-
-  if (
-    status === 401 ||
-    status === 403 ||
-    lower.includes('daytona_reconnect_required') ||
-    lower.includes('invalid api key') ||
-    lower.includes('invalid credentials') ||
-    lower.includes('api key is revoked') ||
-    lower.includes('unauthorized')
-  ) {
-    return {
-      code: 'DAYTONA_RECONNECT_REQUIRED',
-      message: HUMAN_ERROR_COPY.DAYTONA_RECONNECT_REQUIRED,
-      reconnectRequired: true,
-    };
-  }
-
-  if (
-    status === 402 ||
-    lower.includes('daytona_quota_exceeded') ||
-    lower.includes('quota') ||
-    lower.includes('limit exceeded') ||
-    lower.includes('insufficient') ||
-    lower.includes('disk limit') ||
-    lower.includes('memory limit') ||
-    lower.includes('cpu limit')
-  ) {
-    return {
-      code: 'DAYTONA_QUOTA_EXCEEDED',
-      message: HUMAN_ERROR_COPY.DAYTONA_QUOTA_EXCEEDED,
-      reconnectRequired: false,
-    };
-  }
-
-  if (
-    status === 408 ||
-    status === 502 ||
-    status === 503 ||
-    status === 504 ||
-    lower.includes('daytona_timeout') ||
-    lower.includes('timeout') ||
-    lower.includes('timed out') ||
-    lower.includes('aborted') ||
-    lower.includes('etimedout') ||
-    lower.includes('econnreset') ||
-    lower.includes('fetch failed')
-  ) {
-    return {
-      code: 'DAYTONA_TIMEOUT',
-      message: HUMAN_ERROR_COPY.DAYTONA_TIMEOUT,
-      reconnectRequired: false,
-    };
-  }
-
-  return {
-    code: 'DAYTONA_SNAPSHOT_FAILED',
-    message: HUMAN_ERROR_COPY.DAYTONA_SNAPSHOT_FAILED,
-    reconnectRequired: false,
-  };
-}
-
-/**
- * Convert any stored `snapshot_error` value (including legacy rows that may have
- * captured raw Daytona JSON before structured codes were introduced) into a
- * clean, human-readable `{ code, message, reconnectRequired }` object.
- */
-export function sanitizeStoredDaytonaError(
-  stored: string | null | undefined,
-): ClassifiedDaytonaError | null {
-  if (!stored || !stored.trim()) return null;
-  const trimmed = stored.trim();
-  if (trimmed in HUMAN_ERROR_COPY) {
-    const code = trimmed as DaytonaOnboardingErrorCode;
-    return {
-      code,
-      message: HUMAN_ERROR_COPY[code],
-      reconnectRequired: code === 'DAYTONA_RECONNECT_REQUIRED' || code === 'DAYTONA_REGION_REQUIRED',
-    };
-  }
-  return classifyDaytonaError(0, trimmed);
-}
-
-export class DaytonaStructuredError extends Error {
-  readonly code: DaytonaOnboardingErrorCode;
-  readonly httpStatus: number;
-  readonly reconnectRequired: boolean;
-  constructor(
-    code: DaytonaOnboardingErrorCode,
-    message = HUMAN_ERROR_COPY[code],
-    httpStatus = 400,
-  ) {
-    super(message);
-    this.name = 'DaytonaStructuredError';
-    this.code = code;
-    this.httpStatus = httpStatus;
-    this.reconnectRequired =
-      code === 'DAYTONA_RECONNECT_REQUIRED' || code === 'DAYTONA_REGION_REQUIRED';
-  }
-}
-
-export class DaytonaReconnectRequiredError extends Error {
-  readonly code = 'DAYTONA_RECONNECT_REQUIRED' as const;
-  readonly legacyCode = 'daytona_reconnect_required' as const;
-  readonly status = 428;
-  constructor(message = HUMAN_ERROR_COPY.DAYTONA_RECONNECT_REQUIRED) {
-    super(message);
-    this.name = 'DaytonaReconnectRequiredError';
-  }
-}
-
-export function isDaytonaReconnectRequiredError(err: unknown): err is DaytonaReconnectRequiredError {
-  if (err instanceof DaytonaReconnectRequiredError) return true;
-  if (typeof err !== 'object' || err === null) return false;
-  const code = (err as { code?: unknown }).code;
-  return code === 'daytona_reconnect_required' || code === 'DAYTONA_RECONNECT_REQUIRED';
-}
 
 export interface UserDaytonaContext {
   userId: string;
@@ -924,20 +746,48 @@ export async function ensureUserSnapshotActive(
 
 // ─── Per-User Daytona Client Resolution (5-min LRU Cache) ───────────────────
 
-export async function getUserDaytonaContext(userId: string): Promise<UserDaytonaContext | null> {
-  if (!userId || !hasDatabase) return null;
-  const cached = userContextCache.get(userId);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.value;
+export type DaytonaContextResolution =
+  | { kind: 'user'; ctx: UserDaytonaContext }
+  | { kind: 'not_connected'; userId?: string | null; reason?: string }
+  | { kind: 'reconnect_required'; userId?: string | null; message: string; cause?: unknown }
+  | { kind: 'error'; cause: unknown; message: string };
+
+export async function resolveUserDaytonaContext(
+  userId: string,
+): Promise<DaytonaContextResolution> {
+  if (!userId) {
+    return { kind: 'not_connected', userId: null, reason: 'missing_user_id' };
+  }
+  if (!hasDatabase) {
+    const err = new Error('Database unavailable while resolving Daytona credentials');
+    return { kind: 'error', cause: err, message: err.message };
   }
 
-  const rows = await db
-    .select()
-    .from(userDaytonaCredentials)
-    .where(eq(userDaytonaCredentials.userId, userId))
-    .limit(1);
+  const cached = userContextCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { kind: 'user', ctx: cached.value };
+  }
+
+  let rows: Array<typeof userDaytonaCredentials.$inferSelect>;
+  try {
+    rows = await db
+      .select()
+      .from(userDaytonaCredentials)
+      .where(eq(userDaytonaCredentials.userId, userId))
+      .limit(1);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn('[daytona-onboarding] database error resolving user Daytona credentials', {
+      userId,
+      error: message,
+    });
+    return { kind: 'error', cause: err, message };
+  }
+
   const row = rows[0];
-  if (!row) return null;
+  if (!row) {
+    return { kind: 'not_connected', userId, reason: 'no_credentials' };
+  }
 
   let apiKey: string;
   try {
@@ -947,10 +797,16 @@ export async function getUserDaytonaContext(userId: string): Promise<UserDaytona
       encryptionTag: row.encryptionTag,
     });
   } catch (err) {
-    console.error('[daytona-onboarding] failed to decrypt stored user Daytona API key:', err);
-    throw new DaytonaReconnectRequiredError(
-      'Your stored Daytona credentials could not be decrypted. Please reconnect Daytona.',
-    );
+    logger.error('[daytona-onboarding] failed to decrypt stored user Daytona API key', {
+      userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {
+      kind: 'reconnect_required',
+      userId,
+      message: 'Your stored Daytona credentials could not be decrypted. Please reconnect Daytona.',
+      cause: err,
+    };
   }
 
   const client = new Daytona({
@@ -975,61 +831,138 @@ export async function getUserDaytonaContext(userId: string): Promise<UserDaytona
     { value: ctx, expiresAt: Date.now() + USER_CLIENT_CACHE_TTL_MS },
     USER_CLIENT_CACHE_MAX,
   );
-  return ctx;
+  return { kind: 'user', ctx };
 }
 
-async function resolveAccountOwnerUserId(accountId: string): Promise<string | null> {
-  if (!accountId || !hasDatabase) return null;
+/**
+ * Compatibility helper for onboarding status checks that only want the active
+ * context or null when not connected. Propagates DB errors and decrypt failures
+ * instead of silently returning null.
+ */
+export async function getUserDaytonaContext(userId: string): Promise<UserDaytonaContext | null> {
+  const res = await resolveUserDaytonaContext(userId);
+  if (res.kind === 'user') return res.ctx;
+  if (res.kind === 'not_connected') return null;
+  if (res.kind === 'reconnect_required') {
+    throw new DaytonaReconnectRequiredError(res.message);
+  }
+  throw res.cause instanceof Error ? res.cause : new Error(res.message);
+}
+
+type AccountOwnerLookupResult =
+  | { ok: true; userId: string | null }
+  | { ok: false; cause: unknown; message: string };
+
+async function resolveAccountOwnerUserId(accountId: string): Promise<AccountOwnerLookupResult> {
+  if (!accountId) return { ok: true, userId: null };
+  if (!hasDatabase) {
+    const err = new Error('Database unavailable while resolving account owner');
+    return { ok: false, cause: err, message: err.message };
+  }
   const cached = accountOwnerCache.get(accountId);
-  if (cached && cached.expiresAt > Date.now()) return cached.userId;
+  if (cached && cached.expiresAt > Date.now()) {
+    return { ok: true, userId: cached.userId };
+  }
 
   try {
-    const res = await db.execute(
-      sql`SELECT primary_owner_user_id FROM basejump.accounts WHERE id = ${accountId}::uuid LIMIT 1`,
-    );
-    const rows = Array.isArray(res) ? res : ((res as { rows?: unknown[] }).rows ?? []);
-    const ownerId = (rows[0] as { primary_owner_user_id?: string } | undefined)?.primary_owner_user_id ?? null;
+    const rows = await db
+      .select({ userId: accountMembers.userId })
+      .from(accountMembers)
+      .where(and(eq(accountMembers.accountId, accountId), eq(accountMembers.accountRole, 'owner')))
+      .limit(1);
+    const ownerId = rows[0]?.userId ?? null;
     lruSet(
       accountOwnerCache,
       accountId,
       { userId: ownerId, expiresAt: Date.now() + ACCOUNT_OWNER_CACHE_TTL_MS },
       USER_CLIENT_CACHE_MAX,
     );
-    return ownerId;
-  } catch {
-    return null;
+    return { ok: true, userId: ownerId };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn('[daytona-onboarding] failed to resolve account owner', {
+      accountId,
+      error: message,
+    });
+    return { ok: false, cause: err, message };
   }
 }
 
 export async function resolveDaytonaContextForOwner(opts: {
   userId?: string | null;
   accountId?: string | null;
-}): Promise<UserDaytonaContext | null> {
+  sessionId?: string | null;
+}): Promise<DaytonaContextResolution> {
   if (opts.userId) {
-    const direct = await getUserDaytonaContext(opts.userId);
-    if (direct) return direct;
+    const direct = await resolveUserDaytonaContext(opts.userId);
+    if (direct.kind !== 'not_connected') return direct;
   }
-  if (opts.accountId) {
-    const ownerId = await resolveAccountOwnerUserId(opts.accountId);
-    if (ownerId && ownerId !== opts.userId) {
-      return getUserDaytonaContext(ownerId);
+
+  // Account-owner fallback is opt-in only via KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK.
+  if (config.KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK && opts.accountId) {
+    const owner = await resolveAccountOwnerUserId(opts.accountId);
+    if (!owner.ok) {
+      return { kind: 'error', cause: owner.cause, message: owner.message };
+    }
+    if (owner.userId && owner.userId !== opts.userId) {
+      const ownerRes = await resolveUserDaytonaContext(owner.userId);
+      if (ownerRes.kind === 'user') {
+        logger.warn(
+          '[daytona-onboarding] using account-owner Daytona key fallback (KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK=true)',
+          {
+            sessionId: opts.sessionId ?? null,
+            requestedUserId: opts.userId ?? null,
+            fallbackOwnerUserId: owner.userId,
+            accountId: opts.accountId,
+          },
+        );
+      }
+      return ownerRes;
     }
   }
-  return null;
+
+  return {
+    kind: 'not_connected',
+    userId: opts.userId ?? null,
+    reason: opts.userId ? 'user_not_connected' : 'missing_session_owner',
+  };
 }
 
 export async function resolveDaytonaContextForExternalId(
   externalId: string,
-): Promise<UserDaytonaContext | null> {
-  if (!externalId || !hasDatabase) return null;
+): Promise<DaytonaContextResolution> {
+  if (!externalId) {
+    return { kind: 'not_connected', reason: 'missing_external_id' };
+  }
+  if (!hasDatabase) {
+    const err = new Error('Database unavailable while resolving sandbox owner');
+    return { kind: 'error', cause: err, message: err.message };
+  }
+
   const cached = externalOwnerCache.get(externalId);
   if (cached && cached.expiresAt > Date.now()) {
-    return getUserDaytonaContext(cached.userId);
+    const resolved = await resolveUserDaytonaContext(cached.userId);
+    if (resolved.kind === 'user' && cached.orgId && resolved.ctx.daytonaOrgId !== cached.orgId) {
+      externalOwnerCache.delete(externalId);
+      return {
+        kind: 'reconnect_required',
+        userId: cached.userId,
+        message:
+          'This session belongs to a previous Daytona organization. Reconnect that Daytona account or start a new session.',
+      };
+    }
+    return resolved;
   }
+
+  let ownerUserId: string | null = null;
+  let accountId: string | null = null;
+  let orgId: string | undefined;
+  let sessionId: string | null = null;
 
   try {
     const sessRows = await db
       .select({
+        sandboxId: sessionSandboxes.sandboxId,
         accountId: sessionSandboxes.accountId,
         metadata: sessionSandboxes.metadata,
       })
@@ -1037,12 +970,9 @@ export async function resolveDaytonaContextForExternalId(
       .where(eq(sessionSandboxes.externalId, externalId))
       .limit(1);
 
-    let ownerUserId: string | null = null;
-    let accountId: string | null = null;
-    let orgId: string | undefined;
-
     if (sessRows[0]) {
       const meta = (sessRows[0].metadata ?? {}) as Record<string, unknown>;
+      sessionId = sessRows[0].sandboxId ?? null;
       accountId = sessRows[0].accountId ?? null;
       if (typeof meta.daytonaOwnerUserId === 'string' && meta.daytonaOwnerUserId) {
         ownerUserId = meta.daytonaOwnerUserId;
@@ -1062,23 +992,37 @@ export async function resolveDaytonaContextForExternalId(
         accountId = sbRows[0].accountId ?? null;
       }
     }
-
-    const ctx = await resolveDaytonaContextForOwner({ userId: ownerUserId, accountId });
-    if (ctx) {
-      // Only attach this sandbox to the user's org if the sandbox metadata explicitly
-      // matches this org OR carries no conflicting legacy org marker.
-      if (!orgId || orgId === ctx.daytonaOrgId) {
-        rememberExternalIdOwner(externalId, ctx.userId, ctx.daytonaOrgId);
-        return ctx;
-      }
-    }
   } catch (err) {
-    console.warn(
-      `[daytona-onboarding] failed to resolve owner for externalId ${externalId}:`,
-      err instanceof Error ? err.message : String(err),
-    );
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn('[daytona-onboarding] database error resolving owner for externalId', {
+      externalId,
+      error: message,
+    });
+    return { kind: 'error', cause: err, message };
   }
-  return null;
+
+  const resolved = await resolveDaytonaContextForOwner({
+    userId: ownerUserId,
+    accountId,
+    sessionId: sessionId ?? externalId,
+  });
+
+  if (resolved.kind !== 'user') {
+    return resolved;
+  }
+
+  // Never route a sandbox created in Org A to a key belonging to Org B.
+  if (orgId && orgId !== resolved.ctx.daytonaOrgId) {
+    return {
+      kind: 'reconnect_required',
+      userId: resolved.ctx.userId,
+      message:
+        'This session belongs to a previous Daytona organization. Reconnect that Daytona account or start a new session.',
+    };
+  }
+
+  rememberExternalIdOwner(externalId, resolved.ctx.userId, resolved.ctx.daytonaOrgId);
+  return resolved;
 }
 
 // ─── WorkOS Device Flow Onboarding Endpoints Logic ──────────────────────────

@@ -611,12 +611,19 @@ export async function provisionSessionSandbox(opts: {
     targetProvider: string,
   ): Promise<EnsureSandboxImageResult> => {
     if (targetProvider === 'daytona') {
-      const { ensureUserSnapshotActive, resolveDaytonaContextForOwner } = await import(
-        '../../onboarding/daytona-service'
-      );
-      const userDaytona = await resolveDaytonaContextForOwner({ userId, accountId });
-      if (userDaytona) {
-        const ensured = await ensureUserSnapshotActive(userDaytona, undefined, {
+      const {
+        DaytonaNotConnectedError,
+        DaytonaReconnectRequiredError,
+        ensureUserSnapshotActive,
+        resolveDaytonaContextForOwner,
+      } = await import('../../onboarding/daytona-service');
+      const resolution = await resolveDaytonaContextForOwner({
+        userId,
+        accountId,
+        sessionId: sandboxId,
+      });
+      if (resolution.kind === 'user') {
+        const ensured = await ensureUserSnapshotActive(resolution.ctx, undefined, {
           onPulling: (snapshotName) =>
             reportImageStep({ state: 'waiting_for_provider', image: snapshotName }),
         });
@@ -629,6 +636,21 @@ export async function provisionSessionSandbox(opts: {
           runtimeProfile: isMyKortixSandboxSlug(slug) ? 'mykortix' : 'standard',
         };
       }
+      if (resolution.kind === 'reconnect_required') {
+        throw new DaytonaReconnectRequiredError(resolution.message);
+      }
+      if (resolution.kind === 'error') {
+        throw resolution.cause instanceof Error
+          ? resolution.cause
+          : new Error(resolution.message);
+      }
+      if (!config.KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK || !config.DAYTONA_API_KEY) {
+        throw new DaytonaNotConnectedError();
+      }
+      logger.warn(
+        '[session-sandbox] falling back to platform Daytona snapshot builder (KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK=true)',
+        { sessionId: sandboxId, userId, accountId, reason: resolution.reason ?? null },
+      );
     }
     return isMyKortixSandboxSlug(slug)
       ? ensureMyKortixSandboxImage({ source: 'session-start', provider: targetProvider, projectId })

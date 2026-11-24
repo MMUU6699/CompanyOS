@@ -152,7 +152,14 @@ describe('listStoppedDaytonaSandboxesOldestFirst', () => {
         ),
     ) as unknown as typeof fetch;
     const out = await listStoppedDaytonaSandboxesOldestFirst(200);
-    expect(out).toEqual([{ id: 'only', disk: 5, lastActivityAt: null }]);
+    expect(out).toEqual([{ id: 'only', disk: 5, lastActivityAt: null, managed: false }]);
+  });
+
+  test('never silently falls back to platform DAYTONA_API_KEY when an explicit empty apiKeyOverride is passed', async () => {
+    await expect(listStoppedDaytonaSandboxesOldestFirst(10, '')).rejects.toThrow(
+      'Missing user Daytona API key',
+    );
+    expect(await archiveDaytonaSandboxById('sb-1', '')).toBe(false);
   });
 
   test('throws on a non-ok response (never silently returns a partial view)', async () => {

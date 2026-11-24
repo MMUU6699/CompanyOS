@@ -11,7 +11,8 @@ import { beforeEach, expect, mock, test } from 'bun:test';
 
 mock.module('../../config', () => ({
   config: {
-    DAYTONA_API_KEY: 'test-key',
+    DAYTONA_API_KEY: '',
+    KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK: false,
     DAYTONA_SERVER_URL: '',
     DAYTONA_TARGET: '',
     INTERNAL_KORTIX_ENV: 'test',
@@ -21,22 +22,51 @@ mock.module('../../config', () => ({
   KNOWN_PROVIDERS: ['platinum', 'daytona'],
 }));
 
-mock.module('../../shared/db', () => ({ db: {} }));
+mock.module('../../shared/db', () => ({ db: {}, hasDatabase: true }));
 
 let getDaytonaSandbox: (_externalId: string) => Promise<unknown>;
 let activityRefreshes: string[];
 
-mock.module('../../shared/daytona', () => ({
-  getDaytona: () => ({
-    get: (externalId: string) => getDaytonaSandbox(externalId),
+mock.module('../../onboarding/daytona-service', () => ({
+  resolveDaytonaContextForExternalId: async () => ({
+    kind: 'user' as const,
+    ctx: {
+      userId: 'user-1',
+      apiKey: 'user-key-1',
+      daytonaOrgId: 'org-1',
+      daytonaRegion: 'eu',
+      snapshotName: 'kortix-sandbox-test',
+      snapshotStatus: 'active' as const,
+      client: {
+        get: (externalId: string) => getDaytonaSandbox(externalId),
+      },
+    },
   }),
+  resolveDaytonaContextForOwner: async () => ({
+    kind: 'not_connected' as const,
+    reason: 'no_credentials',
+  }),
+  ensureUserSnapshotActive: async () => ({ snapshotName: 'kortix-sandbox-test' }),
+  invalidateUserDaytonaCache: () => {},
+  isDaytonaCredentialRejectedError: () => false,
+  rememberExternalIdOwner: () => {},
+}));
+
+mock.module('../../shared/daytona', () => ({
+  getDaytona: () => {
+    throw new Error('Platform getDaytona() must not be called for per-user sandboxes');
+  },
   // Disk-quota-guard deps (fix(sandbox) #4072) — only referenced by
   // create()/start(), not by getStatus() under test here, but imported at
   // module load so they must exist as named exports for the mock to satisfy
   // platform/providers/daytona.ts's import statement.
   archiveDaytonaSandboxById: async () => ({ ok: true }),
+  getDaytonaSandboxStateById: async () => null,
+  isDaytonaComputeQuotaError: () => false,
   isDaytonaDiskQuotaError: () => false,
-  listStoppedDaytonaSandboxesOldestFirst: async function* () {},
+  listStartedDaytonaSandboxesOldestFirst: async () => [],
+  listStoppedDaytonaSandboxesOldestFirst: async () => [],
+  stopDaytonaSandboxById: async () => true,
 }));
 
 mock.module('../../projects/disk-quota-guard', () => ({
@@ -50,6 +80,9 @@ mock.module('../service-key', () => ({
 mock.module('../sandbox-frontend-url', () => ({
   sandboxFrontendBaseUrl: () => 'https://app.example.com',
 }));
+
+process.env.KORTIX_DAYTONA_CALL_TIMEOUT_MS = '1200';
+const { DaytonaProvider, daytonaLifecycle } = await import('./daytona');
 
 beforeEach(() => {
   // Below the code's own 1000ms floor (Math.max(1000, …)) would just get
@@ -67,7 +100,6 @@ test('renewLifecycle refreshes provider activity for a running sandbox', async (
       activityRefreshes.push('sbx_active');
     },
   });
-  const { DaytonaProvider } = await import('./daytona');
 
   await new DaytonaProvider().renewLifecycle('sbx_active');
 

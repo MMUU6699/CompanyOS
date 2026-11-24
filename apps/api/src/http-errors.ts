@@ -49,7 +49,13 @@ import {
   isDaytonaStateTransitionConflict,
 } from './shared/daytona-state-transition';
 import { isDaytonaTransientProviderError } from './shared/daytona-transient';
-import { isDaytonaReconnectRequiredError } from './onboarding/daytona-service';
+import {
+  classifyDaytonaError,
+  isDaytonaErrorLike,
+  isDaytonaNotConnectedError,
+  isDaytonaReconnectRequiredError,
+  isDaytonaStructuredError,
+} from './shared/daytona-errors';
 import {
   CONNECTORS_PROVIDER_UNAVAILABLE_CODE,
   isComposioTransientProviderError,
@@ -775,6 +781,24 @@ function handleUnhandledError(err: Error, c: Context): Response {
   if (platinum) return platinum;
   const daytonaRateLimited = handleDaytonaRateLimit(err, c, method, path);
   if (daytonaRateLimited) return daytonaRateLimited;
+  if (isDaytonaNotConnectedError(err)) {
+    appLogger.warn(`${method} ${path} -> 428 [DaytonaNotConnectedError] ${err.message}`, {
+      method,
+      path,
+      errorType: 'DaytonaNotConnectedError',
+    });
+    return c.json(
+      {
+        error: 'daytona_not_connected',
+        code: 'DAYTONA_NOT_CONNECTED',
+        message: err.message,
+        reconnectRequired: true,
+        retriable: false,
+        status: 428,
+      },
+      428,
+    );
+  }
   if (isDaytonaReconnectRequiredError(err)) {
     appLogger.warn(`${method} ${path} -> 428 [DaytonaReconnectRequiredError] ${err.message}`, {
       method,
@@ -787,9 +811,29 @@ function handleUnhandledError(err: Error, c: Context): Response {
         code: 'DAYTONA_RECONNECT_REQUIRED',
         message: err.message,
         reconnectRequired: true,
+        retriable: false,
         status: 428,
       },
       428,
+    );
+  }
+  if (isDaytonaStructuredError(err)) {
+    appLogger.warn(`${method} ${path} -> ${err.httpStatus} [${err.code}] ${err.message}`, {
+      method,
+      path,
+      errorType: 'DaytonaStructuredError',
+      code: err.code,
+    });
+    return c.json(
+      {
+        error: err.code.toLowerCase(),
+        code: err.code,
+        message: err.message,
+        reconnectRequired: err.reconnectRequired,
+        retriable: err.retriable,
+        status: err.httpStatus,
+      },
+      err.httpStatus as any,
     );
   }
   const disconnected = handleRepositoryDisconnected(err, c);
@@ -802,6 +846,38 @@ function handleUnhandledError(err: Error, c: Context): Response {
   if (stateTransition) return stateTransition;
   const daytonaTransient = handleDaytonaTransientProviderError(err, c, method, path);
   if (daytonaTransient) return daytonaTransient;
+  if (isDaytonaErrorLike(err)) {
+    const classified = classifyDaytonaError(err);
+    const isUnexpectedServerFailure =
+      classified.code === 'DAYTONA_SNAPSHOT_FAILED' || classified.httpStatus >= 500;
+    if (isUnexpectedServerFailure) {
+      captureException(err, { method, path, errorType: errName, code: classified.code });
+      appLogger.error(`${method} ${path} -> ${classified.httpStatus} [${classified.code}] ${err.message.slice(0, 200)}`, {
+        method,
+        path,
+        errorType: errName,
+        code: classified.code,
+      });
+    } else {
+      appLogger.warn(`${method} ${path} -> ${classified.httpStatus} [${classified.code}] ${err.message.slice(0, 200)}`, {
+        method,
+        path,
+        errorType: errName,
+        code: classified.code,
+      });
+    }
+    return c.json(
+      {
+        error: classified.code.toLowerCase(),
+        code: classified.code,
+        message: classified.message,
+        reconnectRequired: classified.reconnectRequired,
+        retriable: classified.retriable,
+        status: classified.httpStatus,
+      },
+      classified.httpStatus as any,
+    );
+  }
   const composioTransient = handleComposioTransientProviderError(err, c, method, path);
   if (composioTransient) return composioTransient;
   const undecryptable = handleSecretUndecryptable(err, c, method, path);

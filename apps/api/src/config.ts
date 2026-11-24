@@ -693,6 +693,11 @@ const envSchema = z.object({
   // would silently bypass per-project Dockerfiles and is explicitly
   // disallowed.
   DAYTONA_API_KEY: optStr,
+  // Opt-in escape hatch to fall back to the platform DAYTONA_API_KEY (or
+  // account-owner fallback) when a session owner has not connected their own
+  // Daytona account. Default false: every user runs strictly on their own
+  // connected Daytona credentials.
+  KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK: optBoolFalse,
   DAYTONA_SERVER_URL: optStrDefault('https://app.daytona.io/api'),
   DAYTONA_TARGET: optStrDefault('eu'),
   // Pinned immutable GHCR sandbox image reference pulled into each user's own
@@ -1269,22 +1274,25 @@ function validateEnv(): z.infer<typeof envSchema> {
     ? ''
     : ' — agent sessions will fail until it is set (kortix self-host env set ...)';
   if (providers.includes('daytona')) {
-    if (!raw.DAYTONA_API_KEY)
+    const platformFallbackEnabled =
+      (raw as any).KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK === 'true' ||
+      (raw as any).KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK === true;
+    if (platformFallbackEnabled && !raw.DAYTONA_API_KEY)
       issues.push({
         var: 'DAYTONA_API_KEY',
-        message: `Required when ALLOWED_SANDBOX_PROVIDERS includes "daytona" (legacy fallback, removal scheduled; use platinum)${providerKeySuffix}`,
+        message: `Required when KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK=true${providerKeySuffix}`,
         level: providerKeyLevel,
       });
     if (!raw.DAYTONA_SERVER_URL)
       issues.push({
         var: 'DAYTONA_SERVER_URL',
-        message: `Required when ALLOWED_SANDBOX_PROVIDERS includes "daytona" (legacy fallback, removal scheduled; use platinum)${providerKeySuffix}`,
+        message: `Required when ALLOWED_SANDBOX_PROVIDERS includes "daytona"${providerKeySuffix}`,
         level: providerKeyLevel,
       });
     if (!raw.DAYTONA_TARGET)
       issues.push({
         var: 'DAYTONA_TARGET',
-        message: `Required when ALLOWED_SANDBOX_PROVIDERS includes "daytona" (legacy fallback, removal scheduled; use platinum)${providerKeySuffix}`,
+        message: `Required when ALLOWED_SANDBOX_PROVIDERS includes "daytona"${providerKeySuffix}`,
         level: providerKeyLevel,
       });
   }
@@ -1684,6 +1692,7 @@ export const config = {
   // sandbox boots from its project-specific snapshot resolved at session
   // start time by apps/api/src/snapshots/builder.ts.
   DAYTONA_API_KEY: env.DAYTONA_API_KEY,
+  KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK: env.KORTIX_ALLOW_PLATFORM_DAYTONA_FALLBACK,
   DAYTONA_SERVER_URL: env.DAYTONA_SERVER_URL,
   DAYTONA_TARGET: env.DAYTONA_TARGET,
   KORTIX_SANDBOX_GHCR_IMAGE: env.KORTIX_SANDBOX_GHCR_IMAGE,
@@ -1912,7 +1921,9 @@ export const config = {
     if (!this.ALLOWED_SANDBOX_PROVIDERS.includes(name)) return false;
     switch (name) {
       case 'daytona':
-        return !!this.DAYTONA_API_KEY;
+        // Per-user Daytona credentials live in kortix.user_daytona_credentials,
+        // so Daytona operates without a platform DAYTONA_API_KEY.
+        return true;
       case 'platinum':
         return !!this.PLATINUM_API_KEY;
       default: {
