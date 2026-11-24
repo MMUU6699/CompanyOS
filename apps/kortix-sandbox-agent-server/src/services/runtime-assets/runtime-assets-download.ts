@@ -25,9 +25,19 @@ export async function writeOverlay(dir: string, files: OverlayFile[]): Promise<v
       await mkdir(dirname(dest), { recursive: true })
       await writeFile(dest, file.content, 'utf8')
     }
-    const retired = `${dir}.retired-${process.pid}`
+    const retired = `${dir}.retired-${process.pid}-${Date.now()}`
     await rename(dir, retired).catch(() => {})
-    await rename(staging, dir)
+    try {
+      await rename(staging, dir)
+    } catch {
+      // On Linux overlayfs (`redirect_dir=off`), renaming a lower-layer image
+      // directory (`/opt/kortix/managed-skills`) fails with EXDEV, leaving `dir`
+      // non-empty so `rename(staging, dir)` fails with ENOTEMPTY. Removing `dir`
+      // writes upper-layer whiteouts cleanly (`kortix` owns `/opt/kortix` and
+      // the baked skill files) so `staging` can be moved into place.
+      await rm(dir, { recursive: true, force: true })
+      await rename(staging, dir)
+    }
     await rm(retired, { recursive: true, force: true }).catch(() => {})
   } catch (err) {
     await rm(staging, { recursive: true, force: true }).catch(() => {})

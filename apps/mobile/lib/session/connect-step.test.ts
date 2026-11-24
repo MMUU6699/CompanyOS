@@ -129,6 +129,72 @@ describe('connectStepFromStart', () => {
       },
     });
   });
+
+  test('recorded POST /start stage sequence: starting (runtime_updating) -> failed (runtime_update_exhausted) -> error -> ready', () => {
+    // 1. Recorded `starting` (runtime_updating) response -> polls without failing
+    expect(
+      connectStepFromStart({
+        stage: 'starting',
+        retriable: true,
+        reason: 'runtime_updating',
+        sandbox: { status: 'active', external_id: '00000000-0000-4000-8000-000000000101' },
+        failure: null,
+      }),
+    ).toEqual({ kind: 'poll' });
+
+    // 2. Recorded `failed` (`runtime_update_exhausted`) response -> surfaces exact failure message
+    expect(
+      connectStepFromStart({
+        stage: 'failed',
+        retriable: true,
+        reason: 'runtime_update_exhausted',
+        sandbox: { status: 'active', external_id: '00000000-0000-4000-8000-000000000101' },
+        failure: {
+          category: 'sandbox-provider',
+          message:
+            "This session's runtime is out of date and the automatic update has not succeeded after repeated attempts. Try again shortly, or ask an operator to check it.",
+          retryable: true,
+        },
+      }),
+    ).toEqual({
+      kind: 'fail',
+      failure: {
+        title: 'Session failed to start',
+        message:
+          "This session's runtime is out of date and the automatic update has not succeeded after repeated attempts. Try again shortly, or ask an operator to check it.",
+      },
+    });
+
+    // 3. Recorded `error` response -> surfaces typed provider action
+    expect(
+      connectStepFromStart({
+        stage: 'error',
+        retriable: false,
+        code: 'DAYTONA_SNAPSHOT_FAILED',
+        message: 'Cloud computer snapshot build failed.',
+        sandbox: { status: 'stopped', external_id: '00000000-0000-4000-8000-000000000101' },
+        failure: null,
+      }),
+    ).toEqual({
+      kind: 'fail',
+      failure: {
+        title: 'Cloud computer image unavailable',
+        message: 'Cloud computer snapshot build failed.',
+        code: 'DAYTONA_SNAPSHOT_FAILED',
+        actionKind: 'retry',
+      },
+    });
+
+    // 4. Recorded `ready` response -> transitions straight to `open` (clearing all connecting/error banners)
+    expect(
+      connectStepFromStart({
+        stage: 'ready',
+        retriable: false,
+        sandbox: { status: 'active', external_id: '00000000-0000-4000-8000-000000000101' },
+        failure: null,
+      }),
+    ).toEqual({ kind: 'open' });
+  });
 });
 
 describe('connectStepFromRequestError', () => {

@@ -434,7 +434,10 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
   // restart: it continues on a new one from its saved conversation
   // (recoverProjectSession, KRTX-2419), then the same loop boots it.
   const handleRestartSession = useCallback(async () => {
-    const sid = connectingProjectSessionId;
+    const sid =
+      connectingProjectSessionId ??
+      connectingIdRef.current ??
+      connectedSessionIdRef.current;
     if (!sid || restartingSession) return;
     const lost = connectError?.lost === true;
     haptics.tap();
@@ -444,6 +447,9 @@ export function useProjectSessionConnect(projectId: string, projectSessions: Pro
       erroredSessionRef.current = null;
       ensuringRef.current = null;
       setConnectError(null);
+      if (connectingProjectSessionId !== sid) {
+        setConnectingProjectSessionId(sid);
+      }
       void ensureAndOpen(sid);
     } catch (err: any) {
       setConnectError(

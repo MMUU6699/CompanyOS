@@ -9,7 +9,7 @@ import { runtimeAdmissionEnforced } from '../../runtime-convergence/admission';
 import { admitRunningSandbox } from '../../runtime-convergence/admit-running-sandbox';
 import { sessionHoldsTurnAuthority } from '../session-lifecycle/inbox-admission';
 import type { StartCallLog } from '../session-lifecycle/start-envelope';
-import { pinnedRuntimeMayServe } from '../lib/pinned-runtime';
+import { pinnedRuntimeMayServe, staleRuntimeMayServe } from '../lib/pinned-runtime';
 import type { OpenSessionArgs, OpenSessionRow } from './session-open-context';
 import { replaceRefusedRuntimeOnOpen } from './session-open-provision';
 import { serializeSandboxRow, sessionRuntimeUrlPath } from './stopped-wake-result';
@@ -143,7 +143,17 @@ export async function enforceRuntimeGuarantee(
     if (guarantee.action === 'exhausted') {
       const retry = guarantee.retry;
       const detail = guarantee.classification?.detail ?? [];
-      return {
+      const staleButServing = staleRuntimeMayServe(guarantee.classification);
+      if (staleButServing) {
+        console.warn('[start] opening a session on an EXHAUSTED auto-update runtime — it serves, but it is stale', {
+          sandbox_id: row.sandboxId,
+          session_id: row.sessionId,
+          detail: detail.join('; ') || 'runtime_stale',
+          error: retry?.lastError ?? null,
+          attempts: retry?.attempts ?? 0,
+        });
+      }
+      if (!staleButServing) return {
         stage: 'failed',
         agent_name: visible.row.agentName ?? 'default',
         // Named failure, `retry: true`: the reaper keeps this box's cooldown

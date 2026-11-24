@@ -915,6 +915,7 @@ function ProjectSessionView({ projectId, sessionId }: { projectId: string; sessi
         hasFailure: true,
         retriable: session.retriable,
         activelyStarting: session.activelyStarting,
+        stage: session.stage,
       })
     ) {
       return provisioningFailurePresentation(

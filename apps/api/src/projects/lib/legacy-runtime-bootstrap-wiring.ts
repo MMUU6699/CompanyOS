@@ -27,6 +27,7 @@ import {
   updatesItself,
   classifyDaemonHealth,
   describeLegacyBootstrapRetry,
+  relaunchStrategyFor,
   runtimeIdle,
   type ExpectedRunningAssets,
   type LegacyBootstrapDeps,
@@ -34,6 +35,7 @@ import {
   type LegacyBootstrapRetrySummary,
   type RuntimeClassification,
 } from './legacy-runtime-bootstrap';
+import { staleRuntimeMayServe } from './pinned-runtime';
 import { projectsView } from '../../workspaces/rows';
 
 const HEALTH_TIMEOUT_MS = 8_000;
@@ -540,12 +542,24 @@ export async function guaranteeCurrentRuntimeOnOpen(
   const manifestBuild = await deps.manifestBuild();
   if (bootstrapWouldSkip(row.metadata, manifestBuild, deps.now(), row.externalId)) {
     // The scheduled repair would return without touching the box: a
-    // `current` check from before this deploy (6 h TTL), or an agent already
-    // staged for this build. Reporting `repairing` held idle, serving boxes in
-    // `starting` for 122-390 s after each dev deploy on 2026-10-14, until the
-    // daemon swapped itself. Serve the box; the daemon converges at its idle
-    // boundary, and the reaper repairs it once the check expires.
-    return { action: 'proceed', classification, retry: describeLegacyBootstrapRetry(row.metadata, manifestBuild, deps.now()) };
+    // `current` check from before this deploy (6 h TTL), an agent already
+    // staged for this build, or a non-root container (`unsupported`) where the
+    // root-only bootstrap script cannot execute. Serve when the daemon is up
+    // and not missing a required capability; log when unsupported so operators
+    // still see image drift.
+    const retry = describeLegacyBootstrapRetry(row.metadata, manifestBuild, deps.now());
+    if (retry.status === 'unsupported') {
+      if (!staleRuntimeMayServe(classification)) {
+        return { action: 'exhausted', classification, retry };
+      }
+      logger.warn('[runtime-guarantee] opening a session on a stale non-root runtime — daemon is ready and drift is version-only', {
+        sandbox_id: row.sandboxId,
+        session_id: row.sessionId,
+        provider: row.provider,
+        detail: classification.detail.join('; '),
+      });
+    }
+    return { action: 'proceed', classification, retry };
   }
 
   if (!runtimeIdle(await deps.fetchTurnInFlight())) {
@@ -565,6 +579,20 @@ export async function guaranteeCurrentRuntimeOnOpen(
     // by the metadata record's own in-flight guard cross-replica
     // (`LEGACY_BOOTSTRAP_STALE_RUNNING_MS`) — this call never waits for it.
     scheduleRepair(row, 'session-open');
+  }
+  // Providers whose relaunch strategy is `next-start` (Daytona) never restart
+  // the running daemon during bootstrap — at best the script stages `agent.next`
+  // for a future container start, and on non-root images it stamps `unsupported`.
+  // Holding a serving session in `repairing` (`stage: 'starting'`) would block
+  // the user waiting for an in-place relaunch that never happens.
+  if (relaunchStrategyFor(row.provider) === 'next-start' && staleRuntimeMayServe(classification)) {
+    logger.warn('[runtime-guarantee] proceeding on next-start provider while background staging/check runs', {
+      sandbox_id: row.sandboxId,
+      session_id: row.sessionId,
+      provider: row.provider,
+      detail: classification.detail.join('; '),
+    });
+    return { action: 'proceed', classification, retry };
   }
   return { action: 'repairing', classification, retry };
 }

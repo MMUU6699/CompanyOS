@@ -19,8 +19,15 @@ export function shouldPaintTerminalCard(input: {
   hasFailure: boolean;
   retriable: boolean;
   activelyStarting: boolean;
+  stage?: SessionStartStage | null;
 }): boolean {
   if (!input.hasFailure) return false;
+  if (input.stage === 'ready') return false;
+  // Once the server has reached a terminal `failed` or `error` verdict,
+  // `shouldPollSessionStart` stops polling `/start`. Withholding the card on an
+  // `active` sandbox row (where `fatal` does not fire) would strand the user on
+  // a permanent spinner with no poll and no Retry CTA (e.g. `runtime_update_exhausted`).
+  if (input.stage === 'failed' || input.stage === 'error') return true;
   if (input.activelyStarting) return false;
   if (input.retriable) return false;
   return true;

@@ -31,6 +31,49 @@ describe('shouldPaintTerminalCard', () => {
     ).toBe(false);
   });
 
+  test('recorded stage sequence: starting withholds, failed/error paints even when retriable:true on active sandbox, ready clears', () => {
+    // Recorded `starting` (wake cooldown): still polling -> withheld
+    expect(
+      shouldPaintTerminalCard({
+        hasFailure: true,
+        retriable: true,
+        activelyStarting: false,
+        stage: 'starting',
+      }),
+    ).toBe(false);
+
+    // Recorded `failed` (`runtime_update_exhausted`, `retriable: true`, `sandbox.status: 'active'`):
+    // `shouldPollSessionStart` has stopped polling, so the recovery card MUST paint.
+    expect(
+      shouldPaintTerminalCard({
+        hasFailure: true,
+        retriable: true,
+        activelyStarting: false,
+        stage: 'failed',
+      }),
+    ).toBe(true);
+
+    // Recorded `error` (`DAYTONA_ORG_SUSPENDED`): paints recovery card
+    expect(
+      shouldPaintTerminalCard({
+        hasFailure: true,
+        retriable: false,
+        activelyStarting: false,
+        stage: 'error',
+      }),
+    ).toBe(true);
+
+    // Recorded `ready`: never paints any failure card even if a stale failure object lingers
+    expect(
+      shouldPaintTerminalCard({
+        hasFailure: true,
+        retriable: false,
+        activelyStarting: false,
+        stage: 'ready',
+      }),
+    ).toBe(false);
+  });
+
   // I2 lives at the `stage` boundary, not here. `SessionStartResult.retriable`
   // is a required boolean on the wire (`session-sandbox.ts:64`); every real
   // caller either has an actual `/start` answer or has nothing to gate. See

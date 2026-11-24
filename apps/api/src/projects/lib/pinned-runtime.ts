@@ -40,3 +40,27 @@ export function pinnedRuntimeMayServe(
 ): boolean {
   return classification?.runtimeState === 'ok';
 }
+
+/**
+ * PURE. True when a `stale` runtime can still answer a prompt safely, so an
+ * exhausted or non-root auto-update must not brick the session.
+ *
+ * Mirrors `pinnedRuntimeMayServe` with one extra guard: `missing_capability`.
+ * Version/digest drift (`running_assets_stale`, `component_failed`,
+ * `agent_swap_pending`, `running_assets_unreported`) on a daemon reporting
+ * `runtimeState === 'ok'` means the harness is live and serving; refusing the
+ * session trades a guaranteed outage for minor asset drift (e.g. a non-root
+ * per-user Daytona container whose baked `managed_skills_hash` lags `HEAD`).
+ * By contrast, a box missing a required capability (`missing_capability`) or
+ * whose runtime is not `'ok'` genuinely cannot serve and must still fail.
+ */
+export function staleRuntimeMayServe(
+  classification:
+    | Pick<RuntimeClassification, 'runtimeState' | 'staleReasons'>
+    | null
+    | undefined,
+): boolean {
+  if (classification?.runtimeState !== 'ok') return false;
+  if (classification.staleReasons.includes('missing_capability')) return false;
+  return true;
+}

@@ -770,6 +770,27 @@ export function updatesItself(health: unknown, classification: RuntimeClassifica
 }
 
 /**
+ * True when a recorded bootstrap attempt proved the sandbox cannot run the
+ * root-only out-of-band bootstrap script (either stamped `state: 'unsupported'`
+ * directly, or stamped `state: 'failed'` with `preflight: must run as root` by
+ * a deploy prior to `abb2f2be4e`).
+ */
+export function isUnsupportedBootstrapRecord(
+  record: Pick<LegacyBootstrapRecord, 'state' | 'error'> | null | undefined,
+): boolean {
+  if (!record) return false;
+  if (record.state === 'unsupported') return true;
+  if (
+    record.state === 'failed' &&
+    typeof record.error === 'string' &&
+    record.error.toLowerCase().includes('must run as root')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Would an unforced bootstrap of this box, run now, return without touching
  * it? True for a recent `current` check and for a box already staged on this
  * manifest build. The open guarantee asks this before it reports `repairing`:
@@ -783,7 +804,7 @@ export function bootstrapWouldSkip(
 ): boolean {
   if (recentCurrentCheck(readCheck(metadata), nowMs, currentManifestBuild, externalId)) return true;
   const record = readRecord(metadata);
-  if (record?.state === 'unsupported') return true;
+  if (isUnsupportedBootstrapRecord(record)) return true;
   return record?.state === 'staged' && record.manifestBuild === currentManifestBuild;
 }
 
@@ -835,7 +856,7 @@ export function describeLegacyBootstrapRetry(
   if (record.state === 'running') {
     return { status: 'running', classification, attempts: record.attempts, lastAttemptAt: record.lastAttemptAt, lastError: null, nextRetryAt: null };
   }
-  if (record.state === 'unsupported') {
+  if (isUnsupportedBootstrapRecord(record)) {
     return { status: 'unsupported', classification, attempts: record.attempts, lastAttemptAt: record.lastAttemptAt, lastError: record.error ?? null, nextRetryAt: null };
   }
   if (record.state === 'staged' && sameBuild) {
@@ -1119,6 +1140,11 @@ async function checkBootstrapBudget(
   const build = await deps.manifestBuild();
   const sameBuild = record?.manifestBuild === build;
   const attempts = sameBuild && record ? record.attempts : 0;
+  if (record && isUnsupportedBootstrapRecord(record) && !input.force) {
+    const detail = record.error ?? 'non-root sandbox; legacy bootstrap requires root';
+    logSkip(deps, input, 'skipped-unsupported', detail);
+    return { result: { outcome: 'skipped-unsupported', detail, classification } };
+  }
   if (record && sameBuild && record.state === 'failed') {
     if (attempts >= LEGACY_BOOTSTRAP_MAX_ATTEMPTS && !input.force) {
       const detail = `${attempts} attempts on build ${build}`;
@@ -1134,11 +1160,6 @@ async function checkBootstrapBudget(
       logSkip(deps, input, 'skipped-cooldown', `last attempt ${record.lastAttemptAt}`);
       return { result: { outcome: 'skipped-cooldown', classification } };
     }
-  }
-  if (record && record.state === 'unsupported' && !input.force) {
-    const detail = record.error ?? 'non-root sandbox; legacy bootstrap requires root';
-    logSkip(deps, input, 'skipped-unsupported', detail);
-    return { result: { outcome: 'skipped-unsupported', detail, classification } };
   }
   if (record && sameBuild && record.state === 'staged' && !deadDaemonOnRunningBox) {
     // Daytona: staged and waiting for the provider's next start. Nothing
