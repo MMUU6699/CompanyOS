@@ -14,3 +14,8 @@ apps/web/translations/*.json merge=i18n-catalog
 
 # Session-log test fixtures: large synthetic exports. Keep them plain text (the customer-data guard greps them), collapse them in diffs.
 packages/api-contract/src/__tests__/fixtures/session-log/*.json linguist-generated=true -diff
+
+# Shell scripts and patches run inside Linux containers (Railway / Daytona / Docker) and tests; always keep LF even on Windows checkouts.
+*.sh text eol=lf
+*.patch text eol=lf
+
