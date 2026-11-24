@@ -18,11 +18,19 @@ mock.module('react-native', () => ({ View: host('view'), Pressable: host('pressa
 mock.module('expo-router', () => ({ useRouter: () => ({ push: none, replace: none }) }));
 mock.module('expo-constants', () => ({ default: { expoConfig: { version: '0.0.0' } } }));
 mock.module('nativewind', () => ({ useColorScheme: () => ({ colorScheme: 'light' }) }));
+mock.module('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+mock.module('@tanstack/react-query', () => ({
+  useQuery: () => ({ data: undefined, isPending: false, error: null, refetch: async () => ({}) }),
+  useQueryClient: () => ({ setQueryData: none, invalidateQueries: async () => {} }),
+}));
 mock.module('@/lib/icons', () => ({
   UsersIcon: none,
   BellIcon: none,
   BookOpenIcon: none,
   CaretRightIcon: none,
+  CpuIcon: none,
   GlobeIcon: none,
   LifebuoyIcon: none,
   SignOutIcon: none,
@@ -52,6 +60,11 @@ mock.module('@/components/kortix/settings-list', () => ({
   SettingsRow: host('settings-row'),
 }));
 mock.module('@/components/billing/PricingTierBadge', () => ({ PricingTierBadge: none }));
+mock.module('@/components/settings/CloudComputerSheet', () => ({ CloudComputerSheet: none }));
+mock.module('@/lib/onboarding/daytona-client', () => ({
+  DAYTONA_STATUS_QUERY_KEY: ['onboarding', 'daytona-status'],
+  fetchDaytonaOnboardingStatus: async () => ({ connected: false }),
+}));
 mock.module('@/components/settings/EditProfileSheet', () => ({ EditProfileSheet: none }));
 mock.module('@/components/settings/ProfilePicture', () => ({ ProfilePicture: none }));
 mock.module('@/lib/kortix-web', () => ({ KORTIX_WEB_URL: 'https://example.com' }));

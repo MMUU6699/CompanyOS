@@ -56,8 +56,9 @@ import {
   SettingsPage,
   SettingsRow,
 } from '@/components/kortix/settings-list';
-import { Sheet, SheetBody, SheetHeader, type SheetRef } from '@/components/kortix/sheet';
-import { DaytonaStepView } from '@/components/auth/DaytonaStepView';
+import type { SheetRef } from '@/components/kortix/sheet';
+import { CloudComputerSheet } from '@/components/settings/CloudComputerSheet';
+import { deriveCloudComputerView } from '@/lib/onboarding/cloud-computer-view';
 import {
   DAYTONA_STATUS_QUERY_KEY,
   fetchDaytonaOnboardingStatus,
@@ -116,13 +117,24 @@ export function AccountPage({
     retry: 1,
   });
 
-  const daytonaStatusLabel = daytonaStatusQuery.isPending
-    ? 'Checking…'
-    : daytonaStatusQuery.data?.connected && !daytonaStatusQuery.data.reconnectRequired
-      ? 'Connected (Daytona)'
-      : daytonaStatusQuery.data?.reconnectRequired
-        ? 'Reconnect required'
-        : 'Not connected';
+  const daytonaView = React.useMemo(
+    () =>
+      deriveCloudComputerView({
+        isLoading: daytonaStatusQuery.isPending,
+        isOffline: false,
+        errorMessage:
+          daytonaStatusQuery.error instanceof Error ? daytonaStatusQuery.error.message : null,
+        status: daytonaStatusQuery.data,
+        locale: currentLanguage,
+      }),
+    [
+      daytonaStatusQuery.isPending,
+      daytonaStatusQuery.error,
+      daytonaStatusQuery.data,
+      currentLanguage,
+    ],
+  );
+  const daytonaStatusLabel = daytonaView.rowBadge;
 
   const { account: activeAccount } = useActiveAccount();
   // Plan of the active account, shown as the plan badge next to its name.
@@ -312,23 +324,23 @@ export function AccountPage({
         onChangePhoto={profile.changePhoto}
       />
 
-      <Sheet ref={reconnectDaytonaRef} enablePanDownToClose>
-        <SheetHeader title="Cloud computer" />
-        <SheetBody>
-          <DaytonaStepView
-            mode="reconnect"
-            onComplete={({ status }) => {
-              if (status) {
-                queryClient.setQueryData(DAYTONA_STATUS_QUERY_KEY, status);
-              }
-              void queryClient.invalidateQueries({ queryKey: DAYTONA_STATUS_QUERY_KEY });
-              reconnectDaytonaRef.current?.close();
-            }}
-            onCancel={() => reconnectDaytonaRef.current?.close()}
-          />
-        </SheetBody>
-        <View style={{ height: insets.bottom }} />
-      </Sheet>
+      <CloudComputerSheet
+        sheetRef={reconnectDaytonaRef}
+        status={daytonaStatusQuery.data}
+        isLoading={daytonaStatusQuery.isPending}
+        errorMessage={
+          daytonaStatusQuery.error instanceof Error ? daytonaStatusQuery.error.message : null
+        }
+        onRefresh={() => {
+          void daytonaStatusQuery.refetch();
+        }}
+        onStatusUpdated={(next) => {
+          if (next) {
+            queryClient.setQueryData(DAYTONA_STATUS_QUERY_KEY, next);
+          }
+          void queryClient.invalidateQueries({ queryKey: DAYTONA_STATUS_QUERY_KEY });
+        }}
+      />
 
       <AlertDialog
         open={signOutOpen}
