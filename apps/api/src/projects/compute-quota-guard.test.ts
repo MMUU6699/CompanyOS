@@ -206,7 +206,7 @@ describe('compute-quota-guard — eviction safety & concurrent open serializatio
 });
 
 describe('Daytona live org limits & learned caps', () => {
-  test('fetchDaytonaOrgLimits reads GET /organizations/:orgId/usage and caches per org', async () => {
+  test('fetchDaytonaOrgLimits reads live Daytona regionUsage[] shape from GET /organizations/:orgId/usage and caches per org+region', async () => {
     let calls = 0;
     globalThis.fetch = (async (input: string | URL | Request) => {
       calls += 1;
@@ -214,15 +214,29 @@ describe('Daytona live org limits & learned caps', () => {
       expect(url).toBe('https://daytona.test/api/organizations/org-tier2/usage');
       return new Response(
         JSON.stringify({
-          totalCpuQuota: 20,
-          totalMemoryQuota: 24,
-          totalDiskQuota: 60,
+          regionUsage: [
+            {
+              regionId: 'us',
+              sandboxClass: 'container',
+              totalCpuQuota: 10,
+              totalMemoryQuota: 10,
+              totalDiskQuota: 30,
+            },
+            {
+              regionId: 'eu',
+              sandboxClass: 'container',
+              totalCpuQuota: 20,
+              totalMemoryQuota: 24,
+              totalDiskQuota: 60,
+            },
+          ],
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }) as typeof fetch;
 
     const first = await fetchDaytonaOrgLimits('dtn_live_key', 'org-tier2', {
+      region: 'eu',
       sandboxCpu: 2,
       sandboxMemoryGb: 4,
       sandboxDiskGb: 10,
@@ -232,7 +246,7 @@ describe('Daytona live org limits & learned caps', () => {
     expect(first.maxNonArchivedSandboxes).toBe(6); // 60/10=6
 
     // Second call hits 10-min cache without another HTTP round-trip.
-    const second = await fetchDaytonaOrgLimits('dtn_live_key', 'org-tier2');
+    const second = await fetchDaytonaOrgLimits('dtn_live_key', 'org-tier2', { region: 'eu' });
     expect(second.maxRunningSandboxes).toBe(6);
     expect(calls).toBe(1);
   });

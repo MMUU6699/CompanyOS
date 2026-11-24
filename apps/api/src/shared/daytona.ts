@@ -427,6 +427,7 @@ export async function fetchDaytonaOrgLimits(
   apiKey: string,
   orgId: string,
   opts: {
+    region?: string;
     sandboxCpu?: number;
     sandboxMemoryGb?: number;
     sandboxDiskGb?: number;
@@ -434,7 +435,8 @@ export async function fetchDaytonaOrgLimits(
   } = {},
 ): Promise<DaytonaOrgLimits> {
   const nowMs = Date.now();
-  const cached = !opts.forceRefresh ? orgLimitsCache.get(orgId) : undefined;
+  const cacheKey = `${orgId}:${opts.region || 'default'}`;
+  const cached = !opts.forceRefresh ? orgLimitsCache.get(cacheKey) : undefined;
   if (cached && cached.expiresAt > nowMs) {
     return cached.value;
   }
@@ -457,7 +459,7 @@ export async function fetchDaytonaOrgLimits(
       source: 'fallback',
       fetchedAtMs: nowMs,
     };
-    orgLimitsCache.set(orgId, { value: val, expiresAt: nowMs + ORG_LIMITS_FALLBACK_TTL_MS });
+    orgLimitsCache.set(cacheKey, { value: val, expiresAt: nowMs + ORG_LIMITS_FALLBACK_TTL_MS });
     return val;
   };
 
@@ -476,19 +478,39 @@ export async function fetchDaytonaOrgLimits(
       throw err;
     }
     if (!res.ok) return fallback();
-    const body = (await res.json()) as {
+    type QuotaFields = {
+      regionId?: string;
+      sandboxClass?: string;
       totalCpuQuota?: number;
       totalMemoryQuota?: number;
       totalDiskQuota?: number;
-      limits?: {
-        totalCpuQuota?: number;
-        totalMemoryQuota?: number;
-        totalDiskQuota?: number;
-      };
     };
-    const totalCpuQuota = Number(body.totalCpuQuota ?? body.limits?.totalCpuQuota ?? 0);
-    const totalMemoryQuotaGb = Number(body.totalMemoryQuota ?? body.limits?.totalMemoryQuota ?? 0);
-    const totalDiskQuotaGb = Number(body.totalDiskQuota ?? body.limits?.totalDiskQuota ?? 0);
+    const body = (await res.json()) as QuotaFields & {
+      limits?: QuotaFields;
+      regionUsage?: QuotaFields[];
+    };
+    const regions = Array.isArray(body.regionUsage) ? body.regionUsage : [];
+    const desiredRegion = (opts.region || '').trim().toLowerCase();
+    const regionEntry =
+      (desiredRegion
+        ? regions.find(
+            (r) =>
+              String(r.regionId ?? '').toLowerCase() === desiredRegion &&
+              String(r.sandboxClass ?? '').toLowerCase() === 'container',
+          ) ??
+          regions.find((r) => String(r.regionId ?? '').toLowerCase() === desiredRegion)
+        : undefined) ??
+      regions.find((r) => String(r.sandboxClass ?? '').toLowerCase() === 'container') ??
+      regions[0];
+    const totalCpuQuota = Number(
+      regionEntry?.totalCpuQuota ?? body.totalCpuQuota ?? body.limits?.totalCpuQuota ?? 0,
+    );
+    const totalMemoryQuotaGb = Number(
+      regionEntry?.totalMemoryQuota ?? body.totalMemoryQuota ?? body.limits?.totalMemoryQuota ?? 0,
+    );
+    const totalDiskQuotaGb = Number(
+      regionEntry?.totalDiskQuota ?? body.totalDiskQuota ?? body.limits?.totalDiskQuota ?? 0,
+    );
     if (
       !Number.isFinite(totalCpuQuota) ||
       totalCpuQuota <= 0 ||
@@ -514,7 +536,7 @@ export async function fetchDaytonaOrgLimits(
       source: 'api',
       fetchedAtMs: nowMs,
     };
-    orgLimitsCache.set(orgId, { value, expiresAt: nowMs + ORG_LIMITS_CACHE_TTL_MS });
+    orgLimitsCache.set(cacheKey, { value, expiresAt: nowMs + ORG_LIMITS_CACHE_TTL_MS });
     return value;
   } catch (err) {
     const status = (err as { status?: number })?.status;

@@ -254,6 +254,7 @@ async function resolveEffectiveDaytonaOrgCaps(userCtx: UserDaytonaContext | null
     };
   }
   const live = await fetchDaytonaOrgLimits(userCtx.apiKey, userCtx.daytonaOrgId, {
+    region: userCtx.daytonaRegion,
     sandboxCpu: DEFAULT_CPU,
     sandboxMemoryGb: DEFAULT_MEMORY_GB,
     sandboxDiskGb: DEFAULT_DISK_GB,
