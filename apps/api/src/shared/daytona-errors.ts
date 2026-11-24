@@ -484,7 +484,14 @@ export function classifyDaytonaRuntimeError(error: unknown): ClassifiedDaytonaEr
   }
 
   const matchesExplicitDaytonaSignal =
-    isDaytonaErrorLike(error) ||
+    status === 401 ||
+    status === 402 ||
+    status === 403 ||
+    status === 408 ||
+    status === 429 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
     lower.includes('daytona_') ||
     lower.includes('connect your daytona account') ||
     lower.includes('snapshot is still building') ||
@@ -517,7 +524,7 @@ export function classifyDaytonaRuntimeError(error: unknown): ClassifiedDaytonaEr
 
   const classified = classifyDaytonaError(status, rawText);
   if (classified.code === 'DAYTONA_SNAPSHOT_FAILED') {
-    return { ...classified, retriable: false };
+    return null;
   }
   return classified;
 }

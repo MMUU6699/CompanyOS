@@ -89,7 +89,8 @@ const DAYTONA_START_TIMEOUT_MS = configuredTimeoutMs(
   15_000,
 );
 const USER_ORG_AUTOSTOP_MIN_MINUTES = 30;
-const USER_ORG_AUTOSTOP_MAX_MINUTES = 120;
+const USER_ORG_AUTOSTOP_MAX_MINUTES = 60;
+const PLATFORM_DEFAULT_AUTOSTOP_SENTINEL = 720;
 const USER_ORG_AUTOARCHIVE_MAX_MINUTES = 4320;
 const USER_ORG_AUTOARCHIVE_FALLBACK_MINUTES = 1440;
 
@@ -97,10 +98,10 @@ const USER_ORG_AUTOARCHIVE_FALLBACK_MINUTES = 1440;
  * Resolve Daytona lifecycle timers for a user's own Daytona organization.
  *
  * Keeps the provider native `autoStopInterval` strictly above Kortix's own
- * idle reaper grace (`KORTIX_SANDBOX_AUTOSTOP_MINUTES`, default 15m) so the
- * last-used sandbox stays warm through the idle window and Daytona never
- * prematurely stops a sandbox during local tool runs. Honors
- * `KORTIX_SANDBOX_PROVIDER_AUTOSTOP_MINUTES` when set above the minimum floor.
+ * idle reaper grace (`KORTIX_SANDBOX_AUTOSTOP_MINUTES`, default 15m -> floor
+ * 30m) so the last-used sandbox stays warm through the idle window without
+ * inheriting the 12-hour (`720m`) platform default that would burn a user's
+ * free Daytona credits if the reaper were offline.
  */
 export function resolvePerUserDaytonaLifecycle(autoStopOverride?: number): {
   autoStopInterval: number;
@@ -111,11 +112,17 @@ export function resolvePerUserDaytonaLifecycle(autoStopOverride?: number): {
     USER_ORG_AUTOSTOP_MIN_MINUTES,
     (config.KORTIX_SANDBOX_AUTOSTOP_MINUTES || 15) * 2,
   );
-  const configuredBackstop = providerAutoStopBackstopMinutes();
+  const configuredProviderStop = config.KORTIX_SANDBOX_PROVIDER_AUTOSTOP_MINUTES;
+  const userConfiguredStop =
+    typeof configuredProviderStop === 'number' &&
+    configuredProviderStop > 0 &&
+    configuredProviderStop < PLATFORM_DEFAULT_AUTOSTOP_SENTINEL
+      ? configuredProviderStop
+      : idleGraceFloor;
   const baseStop =
     autoStopOverride !== undefined
       ? Math.max(1, autoStopOverride)
-      : Math.max(idleGraceFloor, configuredBackstop);
+      : Math.max(idleGraceFloor, userConfiguredStop);
   const autoStopInterval = Math.min(baseStop, USER_ORG_AUTOSTOP_MAX_MINUTES);
   const configuredArchive =
     config.KORTIX_SANDBOX_AUTOARCHIVE_MINUTES > 0
@@ -842,10 +849,18 @@ export class DaytonaProvider implements SandboxProvider {
       const targetLifecycle = resolvePerUserDaytonaLifecycle();
       const currentStop = Number(sandbox.autoStopInterval ?? 0);
       const currentArchive = Number(sandbox.autoArchiveInterval ?? 0);
-      if (currentStop > 0 && currentStop < targetLifecycle.autoStopInterval) {
+      if (
+        currentStop > 0 &&
+        currentStop < targetLifecycle.autoStopInterval &&
+        typeof sandbox.setAutostopInterval === 'function'
+      ) {
         void sandbox.setAutostopInterval(targetLifecycle.autoStopInterval).catch(() => {});
       }
-      if (currentArchive > 0 && currentArchive < targetLifecycle.autoArchiveInterval) {
+      if (
+        currentArchive > 0 &&
+        currentArchive < targetLifecycle.autoArchiveInterval &&
+        typeof sandbox.setAutoArchiveInterval === 'function'
+      ) {
         void sandbox.setAutoArchiveInterval(targetLifecycle.autoArchiveInterval).catch(() => {});
       }
     }

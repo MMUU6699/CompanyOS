@@ -147,8 +147,10 @@ describe('daytona onboarding region, org propagation & key collision handling', 
     }) as unknown as typeof fetch;
 
     const minted = await mintPermanentDaytonaKey('jwt-test', 'org-123', 'flow-uuid-1234');
-    assert.equal(minted, 'dtn_' + 'unit_test_fixture_value');
-    assert.deepEqual(deleted, ['kortix-app-1']);
+    assert.equal(minted.apiKey, 'dtn_' + 'unit_test_fixture_value');
+    assert.ok(minted.keyName.startsWith('kortix-app-flow-'));
+    // Without a live DB to check referenced keys, stale key cleanup must fail closed (delete nothing).
+    assert.deepEqual(deleted, []);
     assert.equal(postAttempts, 2);
   });
 
@@ -239,8 +241,9 @@ describe('daytona onboarding region, org propagation & key collision handling', 
 
   it('classifies Daytona depleted credits suspension cleanly (not generic error or email unverified)', () => {
     const onboarding = classifyDaytonaError(403, 'Organization is suspended: Depleted credits');
-    assert.equal(onboarding.code, 'DAYTONA_QUOTA_EXCEEDED');
+    assert.equal(onboarding.code, 'DAYTONA_ORG_SUSPENDED');
     assert.equal(onboarding.reconnectRequired, false);
+    assert.equal(onboarding.retriable, false);
 
     const provisioning = classifySandboxProvisioningFailure(
       new Error('Organization is suspended: Depleted credits'),

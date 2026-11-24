@@ -50,7 +50,7 @@ import {
 } from './shared/daytona-state-transition';
 import { isDaytonaTransientProviderError } from './shared/daytona-transient';
 import {
-  classifyDaytonaError,
+  classifyDaytonaRuntimeError,
   isDaytonaErrorLike,
   isDaytonaNotConnectedError,
   isDaytonaReconnectRequiredError,
@@ -847,36 +847,44 @@ function handleUnhandledError(err: Error, c: Context): Response {
   const daytonaTransient = handleDaytonaTransientProviderError(err, c, method, path);
   if (daytonaTransient) return daytonaTransient;
   if (isDaytonaErrorLike(err)) {
-    const classified = classifyDaytonaError(err);
-    const isUnexpectedServerFailure =
-      classified.code === 'DAYTONA_SNAPSHOT_FAILED' || classified.httpStatus >= 500;
-    if (isUnexpectedServerFailure) {
-      captureException(err, { method, path, errorType: errName, code: classified.code });
-      appLogger.error(`${method} ${path} -> ${classified.httpStatus} [${classified.code}] ${err.message.slice(0, 200)}`, {
-        method,
-        path,
-        errorType: errName,
-        code: classified.code,
-      });
-    } else {
-      appLogger.warn(`${method} ${path} -> ${classified.httpStatus} [${classified.code}] ${err.message.slice(0, 200)}`, {
-        method,
-        path,
-        errorType: errName,
-        code: classified.code,
-      });
+    const classified = classifyDaytonaRuntimeError(err);
+    if (classified) {
+      const isUnexpectedServerFailure =
+        classified.code === 'DAYTONA_SNAPSHOT_FAILED' || classified.httpStatus >= 500;
+      if (isUnexpectedServerFailure) {
+        captureException(err, { method, path, errorType: errName, code: classified.code });
+        appLogger.error(
+          `${method} ${path} -> ${classified.httpStatus} [${classified.code}] ${err.message.slice(0, 200)}`,
+          {
+            method,
+            path,
+            errorType: errName,
+            code: classified.code,
+          },
+        );
+      } else {
+        appLogger.warn(
+          `${method} ${path} -> ${classified.httpStatus} [${classified.code}] ${err.message.slice(0, 200)}`,
+          {
+            method,
+            path,
+            errorType: errName,
+            code: classified.code,
+          },
+        );
+      }
+      return c.json(
+        {
+          error: classified.code.toLowerCase(),
+          code: classified.code,
+          message: classified.message,
+          reconnectRequired: classified.reconnectRequired,
+          retriable: classified.retriable,
+          status: classified.httpStatus,
+        },
+        classified.httpStatus as any,
+      );
     }
-    return c.json(
-      {
-        error: classified.code.toLowerCase(),
-        code: classified.code,
-        message: classified.message,
-        reconnectRequired: classified.reconnectRequired,
-        retriable: classified.retriable,
-        status: classified.httpStatus,
-      },
-      classified.httpStatus as any,
-    );
   }
   const composioTransient = handleComposioTransientProviderError(err, c, method, path);
   if (composioTransient) return composioTransient;

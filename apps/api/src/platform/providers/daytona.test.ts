@@ -24,6 +24,13 @@ mock.module('../../config', () => ({
 
 mock.module('../../shared/db', () => ({ db: {}, hasDatabase: true }));
 
+mock.module('../../projects/surface', () => ({
+  ensureDaytonaCapacitySlot: async () => undefined,
+  evictIdleRunningDaytonaSandboxes: async () => ({ runningCount: 0, evictedIds: [], freedMemoryGb: 0 }),
+  reclaimDaytonaDiskSlots: async () => ({ stoppedCount: 0, archivedIds: [], freedDiskGb: 0 }),
+  triggerEmergencyDiskArchiveSweep: () => {},
+}));
+
 let getDaytonaSandbox: (_externalId: string) => Promise<unknown>;
 let activityRefreshes: string[];
 
@@ -49,6 +56,7 @@ mock.module('../../onboarding/daytona-service', () => ({
   ensureUserSnapshotActive: async () => ({ snapshotName: 'kortix-sandbox-test' }),
   invalidateUserDaytonaCache: () => {},
   isDaytonaCredentialRejectedError: () => false,
+  persistLearnedDaytonaOrgCap: async () => {},
   rememberExternalIdOwner: () => {},
 }));
 
@@ -56,6 +64,18 @@ mock.module('../../shared/daytona', () => ({
   getDaytona: () => {
     throw new Error('Platform getDaytona() must not be called for per-user sandboxes');
   },
+  fetchDaytonaOrgLimits: async (_apiKey: string, orgId: string) => ({
+    orgId,
+    totalCpuQuota: 10,
+    totalMemoryQuotaGb: 10,
+    totalDiskQuotaGb: 30,
+    maxRunningSandboxes: 2,
+    maxNonArchivedSandboxes: 3,
+    source: 'fallback' as const,
+    fetchedAtMs: Date.now(),
+  }),
+  getLearnedDaytonaOrgCap: () => null,
+  recordLearnedDaytonaOrgCap: () => ({}),
   // Disk-quota-guard deps (fix(sandbox) #4072) — only referenced by
   // create()/start(), not by getStatus() under test here, but imported at
   // module load so they must exist as named exports for the mock to satisfy

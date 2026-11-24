@@ -58,6 +58,13 @@ mock.module('../../lib/logger', () => ({
 
 mock.module('../../shared/db', () => ({ db: {}, hasDatabase: true }));
 
+mock.module('../../projects/surface', () => ({
+  ensureDaytonaCapacitySlot: async () => undefined,
+  evictIdleRunningDaytonaSandboxes: async () => ({ runningCount: 0, evictedIds: [], freedMemoryGb: 0 }),
+  reclaimDaytonaDiskSlots: async () => ({ stoppedCount: 0, archivedIds: [], freedDiskGb: 0 }),
+  triggerEmergencyDiskArchiveSweep: () => {},
+}));
+
 let platformCalls = 0;
 let userCalls: string[] = [];
 let nextOwnerResolution: DaytonaContextResolution;
@@ -113,6 +120,18 @@ mock.module('../../shared/daytona', () => ({
     return makeUserClient('platform');
   },
   archiveDaytonaSandboxById: async () => true,
+  fetchDaytonaOrgLimits: async (_apiKey: string, orgId: string) => ({
+    orgId,
+    totalCpuQuota: 10,
+    totalMemoryQuotaGb: 10,
+    totalDiskQuotaGb: 30,
+    maxRunningSandboxes: 2,
+    maxNonArchivedSandboxes: 3,
+    source: 'fallback' as const,
+    fetchedAtMs: Date.now(),
+  }),
+  getLearnedDaytonaOrgCap: () => null,
+  recordLearnedDaytonaOrgCap: () => ({}),
   getDaytonaSandboxStateById: async () => 'stopped',
   isDaytonaComputeQuotaError: () => false,
   isDaytonaDiskQuotaError: () => false,
@@ -150,6 +169,7 @@ mock.module('../../onboarding/daytona-service', () => ({
   invalidateUserDaytonaCache: () => {},
   isDaytonaCredentialRejectedError: (err: unknown) =>
     err instanceof Error && err.message.includes('Invalid credentials'),
+  persistLearnedDaytonaOrgCap: async () => {},
   rememberExternalIdOwner: () => {},
 }));
 
