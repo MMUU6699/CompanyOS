@@ -43,7 +43,13 @@ export function createPublicEdgeRateLimitMiddleware(): MiddlewareHandler {
     // every such caller in a single 30/minute bucket throttled the whole flow
     // suite. Production is always behind the edge and always carries one.
     if (clientKey === 'unknown') return next();
-    const isAuth = ['/v1/auth', '/v1/oauth', '/v1/access', '/v1/tunnel/device-auth'].some(
+    const isAuth = [
+      '/v1/auth',
+      '/v1/oauth',
+      '/v1/access',
+      '/v1/tunnel/device-auth',
+      '/v1/onboarding',
+    ].some(
       (prefix) => c.req.path === prefix || c.req.path.startsWith(`${prefix}/`),
     );
     const key = budgetKey(c, clientKey);

@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Daytona } from '@daytonaio/sdk';
-import { and, eq, gt, lt, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 import {
   accountMembers,
   daytonaConnectFlows,
@@ -11,6 +11,7 @@ import {
 import { config } from '../config';
 import { logger } from '../lib/logger';
 import { db, hasDatabase } from '../shared/db';
+import { stopDaytonaSandboxById } from '../shared/daytona';
 import { configuredTimeoutMs } from '../shared/with-timeout';
 import {
   DAYTONA_HUMAN_ERROR_COPY as HUMAN_ERROR_COPY,
@@ -101,12 +102,19 @@ const REQUIRED_DAYTONA_KEY_PERMISSIONS = [
 
 // ─── LRU Caches ──────────────────────────────────────────────────────────────
 
+// replica-local: short-lived decrypted per-user Daytona client cache; invalidated on disconnect/reclaim/401.
 const userContextCache = new Map<string, { value: UserDaytonaContext; expiresAt: number }>();
+// replica-local: short-lived externalId -> ownerUserId lookup cache; backed by session_sandboxes in DB.
 const externalOwnerCache = new Map<string, { userId: string; orgId?: string; expiresAt: number }>();
+// replica-local: short-lived accountId -> ownerUserId lookup cache; backed by account_members in DB.
 const accountOwnerCache = new Map<string, { userId: string | null; expiresAt: number }>();
+// replica-local: short-lived active snapshot cache per org; verified against Daytona on miss.
 const verifiedActiveSnapshotCache = new Map<string, number>(); // `${orgId}:${snapshotName}` -> verifiedAtMs
+// replica-local: in-process single-flight dedup for concurrent snapshot ensures; DB holds authoritative state.
 const ensureSnapshotInFlight = new Map<string, Promise<EnsureUserSnapshotResult>>();
+// replica-local: in-process single-flight dedup for concurrent polls; DB CAS ('pending' -> 'exchanging') coordinates across replicas.
 const pollFlowInFlight = new Map<string, Promise<PollDaytonaConnectResult>>();
+// replica-local: short-lived fallback cache for terminal errors; DB columns terminal_error_* are the cross-replica source of truth.
 const flowTerminalErrorCache = new Map<
   string,
   { code: DaytonaOnboardingErrorCode; message: string; httpStatus: number; expiresAt: number }
@@ -132,6 +140,11 @@ export function invalidateUserDaytonaCache(userId: string): void {
       if (k.startsWith(`${existing.value.daytonaOrgId}:`)) {
         verifiedActiveSnapshotCache.delete(k);
       }
+    }
+  }
+  for (const [extId, entry] of externalOwnerCache.entries()) {
+    if (entry.userId === userId) {
+      externalOwnerCache.delete(extId);
     }
   }
   userContextCache.delete(userId);
@@ -1036,7 +1049,34 @@ export interface StartDaytonaConnectResult {
   interval: number;
 }
 
-export async function startDaytonaConnect(): Promise<StartDaytonaConnectResult> {
+export async function startDaytonaConnect(opts?: {
+  clientIpHash?: string | null;
+}): Promise<StartDaytonaConnectResult> {
+  const clientIpHash = opts?.clientIpHash?.trim() || null;
+
+  if (clientIpHash && hasDatabase) {
+    const maxActivePerIp = config.KORTIX_DAYTONA_MAX_ACTIVE_FLOWS_PER_IP || 5;
+    const activeRows = await db
+      .select({ flowId: daytonaConnectFlows.flowId })
+      .from(daytonaConnectFlows)
+      .where(
+        and(
+          eq(daytonaConnectFlows.clientIpHash, clientIpHash),
+          inArray(daytonaConnectFlows.status, ['pending', 'exchanging', 'approved']),
+          gt(daytonaConnectFlows.expiresAt, new Date()),
+        ),
+      )
+      .limit(maxActivePerIp + 1);
+    if (activeRows.length >= maxActivePerIp) {
+      throw new DaytonaStructuredError(
+        'DAYTONA_TOO_MANY_FLOWS',
+        HUMAN_ERROR_COPY.DAYTONA_TOO_MANY_FLOWS,
+        429,
+        true,
+      );
+    }
+  }
+
   const oidc = await getDaytonaWorkosOidcConfig();
   const form = new URLSearchParams({
     client_id: oidc.clientId,
@@ -1086,14 +1126,21 @@ export async function startDaytonaConnect(): Promise<StartDaytonaConnectResult> 
     userCode: dc.user_code,
     verificationUriComplete,
     status: 'pending',
+    clientIpHash,
     expiresAt,
   });
 
-  // Best-effort cleanup of old expired flows (> 1h past expiry).
+  // Best-effort cleanup of already-settled flows (> 1h past expiry, key scrubbed).
   const pruneBefore = new Date(Date.now() - 60 * 60_000);
   void db
     .delete(daytonaConnectFlows)
-    .where(lt(daytonaConnectFlows.expiresAt, pruneBefore))
+    .where(
+      and(
+        lt(daytonaConnectFlows.expiresAt, pruneBefore),
+        inArray(daytonaConnectFlows.status, ['claimed', 'expired']),
+        sql`${daytonaConnectFlows.encryptedApiKey} IS NULL`,
+      ),
+    )
     .catch(() => {});
 
   return {
@@ -1248,7 +1295,61 @@ export async function fetchOrganizationsWithPropagationRetry(
   return [];
 }
 
+const STALE_UNREFERENCED_KEY_MIN_AGE_MS = 30 * 60_000;
+const EXCHANGING_STALE_MS = 90_000;
+
+/**
+ * Prune ONLY provably unreferenced, old `kortix-app-*` API keys in `orgId`.
+ *
+ * Safety invariants (fixes shared-org key eviction bug):
+ * 1. NEVER delete any key name referenced by `kortix.user_daytona_credentials`
+ *    or an active `kortix.daytona_connect_flows` row in `orgId`.
+ * 2. If any credential row in `orgId` has `daytona_key_name IS NULL` (legacy
+ *    pre-migration row), keep at least `legacyNullCount + 2` newest unreferenced
+ *    keys so pre-migration users sharing an org cannot be evicted.
+ * 3. NEVER delete keys younger than 30 minutes (protects in-flight flows).
+ * 4. Fail closed: if querying referenced keys fails, skip cleanup completely.
+ */
 async function cleanupStaleKortixApiKeys(jwt: string, orgId: string): Promise<void> {
+  if (!hasDatabase) return;
+
+  const referencedKeyNames = new Set<string>();
+  let legacyNullCredCount = 0;
+  try {
+    const [credRows, flowRows] = await Promise.all([
+      db
+        .select({ daytonaKeyName: userDaytonaCredentials.daytonaKeyName })
+        .from(userDaytonaCredentials)
+        .where(eq(userDaytonaCredentials.daytonaOrgId, orgId)),
+      db
+        .select({ daytonaKeyName: daytonaConnectFlows.daytonaKeyName })
+        .from(daytonaConnectFlows)
+        .where(
+          and(
+            eq(daytonaConnectFlows.daytonaOrgId, orgId),
+            inArray(daytonaConnectFlows.status, ['exchanging', 'approved']),
+            gt(daytonaConnectFlows.expiresAt, new Date()),
+          ),
+        ),
+    ]);
+    for (const r of credRows) {
+      if (r.daytonaKeyName) {
+        referencedKeyNames.add(r.daytonaKeyName);
+      } else {
+        legacyNullCredCount += 1;
+      }
+    }
+    for (const r of flowRows) {
+      if (r.daytonaKeyName) referencedKeyNames.add(r.daytonaKeyName);
+    }
+  } catch (err) {
+    logger.warn('[daytona-onboarding] skipping stale key cleanup because DB reference query failed', {
+      orgId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
   const base = daytonaApiBaseUrl();
   try {
     const listRes = await fetch(`${base}/api-keys`, {
@@ -1262,13 +1363,27 @@ async function cleanupStaleKortixApiKeys(jwt: string, orgId: string): Promise<vo
     if (!listRes.ok) return;
     const keys = (await listRes.json()) as Array<{ name?: string; createdAt?: string }>;
     if (!Array.isArray(keys)) return;
-    const kortixKeys = keys
-      .filter((k) => typeof k.name === 'string' && k.name.startsWith('kortix-app-'))
+    const now = Date.now();
+    const unreferencedKortixKeys = keys
+      .filter(
+        (k) =>
+          typeof k.name === 'string' &&
+          k.name.startsWith('kortix-app-') &&
+          !referencedKeyNames.has(k.name),
+      )
       .sort((a, b) => Date.parse(b.createdAt || '0') - Date.parse(a.createdAt || '0'));
-    // Keep the 2 most recent Kortix keys and prune older stale ones from prior reconnects.
-    const stale = kortixKeys.slice(2);
-    for (const oldKey of stale) {
+
+    // Preserve newest unreferenced keys for any legacy pre-migration rows that
+    // have not yet recorded daytona_key_name, plus 1 extra safety slot.
+    const preserveCount = legacyNullCredCount > 0 ? legacyNullCredCount + 2 : 0;
+    const candidates = unreferencedKortixKeys.slice(preserveCount);
+
+    for (const oldKey of candidates) {
       if (!oldKey.name) continue;
+      const createdMs = Date.parse(oldKey.createdAt || '');
+      if (Number.isFinite(createdMs) && now - createdMs < STALE_UNREFERENCED_KEY_MIN_AGE_MS) {
+        continue;
+      }
       await fetch(`${base}/api-keys/${encodeURIComponent(oldKey.name)}`, {
         method: 'DELETE',
         headers: {
@@ -1283,19 +1398,28 @@ async function cleanupStaleKortixApiKeys(jwt: string, orgId: string): Promise<vo
   }
 }
 
+export interface MintedDaytonaKey {
+  apiKey: string;
+  keyName: string;
+  expiresAt: Date | null;
+}
+
 export async function mintPermanentDaytonaKey(
   jwt: string,
   orgId: string,
   flowId: string,
-): Promise<string> {
+): Promise<MintedDaytonaKey> {
   const base = daytonaApiBaseUrl();
   await cleanupStaleKortixApiKeys(jwt, orgId);
 
+  const ttlDays = config.KORTIX_DAYTONA_KEY_TTL_DAYS || 0;
+  const expiresAt = ttlDays > 0 ? new Date(Date.now() + ttlDays * 86_400_000) : null;
+
   const shortTs = Date.now().toString(36);
-  const shortFlow = flowId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6) || 'key';
+  const shortFlow = flowId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'key';
   for (let attempt = 0; attempt < 3; attempt++) {
     const suffix = attempt === 0 ? '' : `-${randomBytes(2).toString('hex')}`;
-    const keyName = `kortix-app-${shortTs}-${shortFlow}${suffix}`;
+    const keyName = `kortix-app-flow-${shortFlow}-${shortTs}${suffix}`;
     const res = await fetch(`${base}/api-keys`, {
       method: 'POST',
       headers: {
@@ -1307,7 +1431,7 @@ export async function mintPermanentDaytonaKey(
       body: JSON.stringify({
         name: keyName,
         permissions: [...REQUIRED_DAYTONA_KEY_PERMISSIONS],
-        expiresAt: null,
+        expiresAt: expiresAt ? expiresAt.toISOString() : null,
       }),
       signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
     });
@@ -1317,13 +1441,15 @@ export async function mintPermanentDaytonaKey(
       (res.status === 400 && text.toLowerCase().includes('already exists'));
     if (isCollision && attempt < 2) continue;
     if (!res.ok) {
-      console.error(
-        `[daytona-onboarding] POST /api-keys failed (HTTP ${res.status}): ${text.slice(0, 300)}`,
-      );
+      logger.error('[daytona-onboarding] POST /api-keys failed', {
+        orgId,
+        status: res.status,
+        body: text.slice(0, 300),
+      });
       const classified = classifyDaytonaError(res.status, text);
-      throw new DaytonaStructuredError(classified.code, classified.message, 502);
+      throw new DaytonaStructuredError(classified.code, classified.message, classified.httpStatus);
     }
-    const created = JSON.parse(text) as { value?: string };
+    const created = JSON.parse(text) as { value?: string; name?: string; expiresAt?: string | null };
     if (!created.value || !created.value.startsWith('dtn_')) {
       throw new DaytonaStructuredError(
         'DAYTONA_RECONNECT_REQUIRED',
@@ -1331,13 +1457,49 @@ export async function mintPermanentDaytonaKey(
         502,
       );
     }
-    return created.value;
+    return {
+      apiKey: created.value,
+      keyName: created.name || keyName,
+      expiresAt: created.expiresAt ? new Date(created.expiresAt) : expiresAt,
+    };
   }
   throw new DaytonaStructuredError(
     'DAYTONA_RECONNECT_REQUIRED',
     'Could not create a Daytona workspace key after retrying. Please try again.',
     502,
   );
+}
+
+function toPollResultFromFlow(
+  flow: typeof daytonaConnectFlows.$inferSelect,
+): PollDaytonaConnectResult | null {
+  if (flow.status === 'approved' && flow.claimToken && flow.daytonaOrgId) {
+    return {
+      status: 'approved',
+      claimToken: flow.claimToken,
+      orgId: flow.daytonaOrgId,
+      region: flow.daytonaRegion || 'eu',
+    };
+  }
+  if (flow.status === 'claimed') {
+    return {
+      status: 'claimed',
+      orgId: flow.daytonaOrgId ?? null,
+      region: flow.daytonaRegion ?? null,
+    };
+  }
+  if (flow.terminalErrorCode) {
+    const code = flow.terminalErrorCode as DaytonaOnboardingErrorCode;
+    throw new DaytonaStructuredError(
+      code,
+      flow.terminalErrorMessage || HUMAN_ERROR_COPY[code] || HUMAN_ERROR_COPY.DAYTONA_SNAPSHOT_FAILED,
+      flow.terminalErrorStatus ?? 400,
+    );
+  }
+  if (flow.status === 'expired') {
+    return { status: 'expired' };
+  }
+  return null;
 }
 
 export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectResult> {
@@ -1363,45 +1525,98 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
       throw new Error('Daytona onboarding flow not found');
     }
 
-    if (flow.status === 'approved' && flow.claimToken && flow.daytonaOrgId) {
-      return {
-        status: 'approved',
-        claimToken: flow.claimToken,
-        orgId: flow.daytonaOrgId,
-        region: flow.daytonaRegion || 'eu',
-      };
-    }
-    if (flow.status === 'claimed') {
-      return {
-        status: 'claimed',
-        orgId: flow.daytonaOrgId ?? null,
-        region: flow.daytonaRegion ?? null,
-      };
-    }
-    if (flow.status === 'expired' || flow.expiresAt.getTime() <= Date.now()) {
-      if (flow.status !== 'expired') {
-        await db
-          .update(daytonaConnectFlows)
-          .set({ status: 'expired', updatedAt: new Date() })
-          .where(eq(daytonaConnectFlows.flowId, flowId));
+    const immediate = toPollResultFromFlow(flow);
+    if (immediate) return immediate;
+
+    if (flow.expiresAt.getTime() <= Date.now()) {
+      const expired = await db
+        .update(daytonaConnectFlows)
+        .set({ status: 'expired', updatedAt: new Date() })
+        .where(
+          and(
+            eq(daytonaConnectFlows.flowId, flowId),
+            inArray(daytonaConnectFlows.status, ['pending', 'exchanging']),
+          ),
+        )
+        .returning();
+      if (expired.length > 0) return { status: 'expired' };
+      const reread = await db
+        .select()
+        .from(daytonaConnectFlows)
+        .where(eq(daytonaConnectFlows.flowId, flowId))
+        .limit(1);
+      if (reread[0]) {
+        const after = toPollResultFromFlow(reread[0]);
+        if (after) return after;
       }
       return { status: 'expired' };
     }
 
-    const oidc = await getDaytonaWorkosOidcConfig();
-    const tokRes = await fetch(oidc.tokenEndpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json',
-      },
-      body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-        device_code: flow.deviceCode,
-        client_id: oidc.clientId,
-      }).toString(),
-      signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
-    });
+    // Strict conditional CAS: pending -> exchanging before calling WorkOS.
+    // Reclaims stale 'exchanging' (>90s) only if a prior replica crashed mid-exchange.
+    const staleExchangeCutoff = new Date(Date.now() - EXCHANGING_STALE_MS);
+    const claimedForExchange = await db
+      .update(daytonaConnectFlows)
+      .set({ status: 'exchanging', updatedAt: new Date() })
+      .where(
+        and(
+          eq(daytonaConnectFlows.flowId, flowId),
+          or(
+            eq(daytonaConnectFlows.status, 'pending'),
+            and(
+              eq(daytonaConnectFlows.status, 'exchanging'),
+              lt(daytonaConnectFlows.updatedAt, staleExchangeCutoff),
+            ),
+          ),
+        ),
+      )
+      .returning();
+
+    if (claimedForExchange.length === 0) {
+      // Another poller/replica already holds 'exchanging' or moved the flow to approved/claimed/expired.
+      const reread = await db
+        .select()
+        .from(daytonaConnectFlows)
+        .where(eq(daytonaConnectFlows.flowId, flowId))
+        .limit(1);
+      if (reread[0]) {
+        const settled = toPollResultFromFlow(reread[0]);
+        if (settled) return settled;
+      }
+      return { status: 'pending' };
+    }
+
+    const activeFlow = claimedForExchange[0]!;
+    let tokRes: Response;
+    try {
+      const oidc = await getDaytonaWorkosOidcConfig();
+      tokRes = await fetch(oidc.tokenEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+        },
+        body: new URLSearchParams({
+          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+          device_code: activeFlow.deviceCode,
+          client_id: oidc.clientId,
+        }).toString(),
+        signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
+      });
+    } catch (networkErr) {
+      // Revert exchanging -> pending on transient network failure before token consumption.
+      await db
+        .update(daytonaConnectFlows)
+        .set({ status: 'pending', updatedAt: new Date() })
+        .where(
+          and(
+            eq(daytonaConnectFlows.flowId, flowId),
+            eq(daytonaConnectFlows.status, 'exchanging'),
+          ),
+        )
+        .catch(() => {});
+      throw networkErr;
+    }
 
     const tokText = await tokRes.text();
     if (!tokRes.ok) {
@@ -1411,39 +1626,90 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
       } catch {
         errCode = '';
       }
-      if (errCode === 'authorization_pending') {
-        return { status: 'pending' };
-      }
-      if (errCode === 'slow_down') {
-        return { status: 'pending', slowDown: true };
+      if (errCode === 'authorization_pending' || errCode === 'slow_down') {
+        await db
+          .update(daytonaConnectFlows)
+          .set({ status: 'pending', updatedAt: new Date() })
+          .where(
+            and(
+              eq(daytonaConnectFlows.flowId, flowId),
+              eq(daytonaConnectFlows.status, 'exchanging'),
+            ),
+          );
+        return errCode === 'slow_down' ? { status: 'pending', slowDown: true } : { status: 'pending' };
       }
       if (
         errCode === 'expired_token' ||
         errCode === 'access_denied' ||
         errCode === 'invalid_grant'
       ) {
-        await db
+        // Conditional UPDATE: a late invalid_grant can NEVER overwrite 'approved' or 'claimed'.
+        const updated = await db
           .update(daytonaConnectFlows)
           .set({ status: 'expired', updatedAt: new Date() })
-          .where(eq(daytonaConnectFlows.flowId, flowId));
+          .where(
+            and(
+              eq(daytonaConnectFlows.flowId, flowId),
+              inArray(daytonaConnectFlows.status, ['pending', 'exchanging']),
+            ),
+          )
+          .returning();
+        if (updated.length > 0) {
+          return { status: 'expired' };
+        }
+        const reread = await db
+          .select()
+          .from(daytonaConnectFlows)
+          .where(eq(daytonaConnectFlows.flowId, flowId))
+          .limit(1);
+        if (reread[0]) {
+          const settled = toPollResultFromFlow(reread[0]);
+          if (settled) return settled;
+        }
         return { status: 'expired' };
       }
-      throw new Error(`WorkOS token poll failed (HTTP ${tokRes.status}): ${tokText.slice(0, 200)}`);
+      // Transient WorkOS error: revert exchanging -> pending so next poll retries.
+      await db
+        .update(daytonaConnectFlows)
+        .set({ status: 'pending', updatedAt: new Date() })
+        .where(
+          and(
+            eq(daytonaConnectFlows.flowId, flowId),
+            eq(daytonaConnectFlows.status, 'exchanging'),
+          ),
+        )
+        .catch(() => {});
+      const classified = classifyDaytonaError(tokRes.status, tokText);
+      throw new DaytonaStructuredError(classified.code, classified.message, classified.httpStatus);
     }
 
     const tok = JSON.parse(tokText) as { access_token?: string };
     const jwt = tok.access_token;
     if (!jwt) {
-      throw new Error('WorkOS token exchange succeeded without access_token');
+      await db
+        .update(daytonaConnectFlows)
+        .set({ status: 'expired', updatedAt: new Date() })
+        .where(
+          and(
+            eq(daytonaConnectFlows.flowId, flowId),
+            eq(daytonaConnectFlows.status, 'exchanging'),
+          ),
+        )
+        .catch(() => {});
+      throw new DaytonaStructuredError(
+        'DAYTONA_RECONNECT_REQUIRED',
+        'Daytona authorization completed without an access token. Please reconnect.',
+        502,
+      );
     }
 
     // WorkOS device_code is single-use: once we receive `jwt`, any subsequent call to
-    // WorkOS with this device_code returns `invalid_grant`/`expired_token`. Cache any
-    // post-JWT Daytona refusal (e.g. EMAIL_ACCESS_DENIED, Depleted credits) on `flowId`
-    // so subsequent client polls surface the real error instead of falsely reporting "expired".
+    // WorkOS with this device_code returns `invalid_grant`. Persist any post-JWT
+    // Daytona refusal directly in DB (`terminal_error_*`) so every replica surfaces
+    // the exact typed error instead of falsely reporting "expired".
     let org: DaytonaOrgSummary;
     let region: string;
-    let permanentApiKey: string;
+    let mintedKey: MintedDaytonaKey;
     try {
       const orgs = await fetchOrganizationsWithPropagationRetry(jwt);
       const foundOrg = orgs.find((o) => o.personal) || orgs[0];
@@ -1456,32 +1722,37 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
       }
       if (foundOrg.suspended) {
         const reason = String(foundOrg.suspensionReason || '');
-        console.warn(
-          `[daytona-onboarding] org ${foundOrg.id} is suspended (reason=${reason || 'none'})`,
-        );
-        if (/credit|depleted|billing|quota/i.test(reason)) {
+        logger.warn('[daytona-onboarding] org is suspended during connect', {
+          orgId: foundOrg.id,
+          reason: reason || 'none',
+        });
+        if (/email/i.test(reason)) {
           throw new DaytonaStructuredError(
-            'DAYTONA_QUOTA_EXCEEDED',
-            HUMAN_ERROR_COPY.DAYTONA_QUOTA_EXCEEDED,
-            402,
+            'DAYTONA_EMAIL_UNVERIFIED',
+            HUMAN_ERROR_COPY.DAYTONA_EMAIL_UNVERIFIED,
+            403,
           );
         }
         throw new DaytonaStructuredError(
-          'DAYTONA_EMAIL_UNVERIFIED',
-          HUMAN_ERROR_COPY.DAYTONA_EMAIL_UNVERIFIED,
-          400,
+          'DAYTONA_ORG_SUSPENDED',
+          HUMAN_ERROR_COPY.DAYTONA_ORG_SUSPENDED,
+          402,
         );
       }
       org = foundOrg;
       region = await ensureDefaultRegionOnOrg(jwt, org.id, org.defaultRegionId);
-      permanentApiKey = await mintPermanentDaytonaKey(jwt, org.id, flowId);
+      mintedKey = await mintPermanentDaytonaKey(jwt, org.id, flowId);
     } catch (postJwtErr) {
       const structured =
         postJwtErr instanceof DaytonaStructuredError
           ? postJwtErr
           : (() => {
               const classified = classifyDaytonaError(postJwtErr);
-              return new DaytonaStructuredError(classified.code, classified.message, 400);
+              return new DaytonaStructuredError(
+                classified.code,
+                classified.message,
+                classified.httpStatus,
+              );
             })();
       lruSet(
         flowTerminalErrorCache,
@@ -1494,41 +1765,77 @@ export function pollDaytonaConnect(flowId: string): Promise<PollDaytonaConnectRe
         },
         500,
       );
+      await db
+        .update(daytonaConnectFlows)
+        .set({
+          status: 'expired',
+          terminalErrorCode: structured.code,
+          terminalErrorMessage: structured.message,
+          terminalErrorStatus: structured.httpStatus,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(daytonaConnectFlows.flowId, flowId),
+            eq(daytonaConnectFlows.status, 'exchanging'),
+          ),
+        )
+        .catch(() => {});
       throw structured;
     }
 
-    const encrypted = encryptDaytonaApiKey(flowId, permanentApiKey);
+    const encrypted = encryptDaytonaApiKey(flowId, mintedKey.apiKey);
     const claimToken = randomBytes(32).toString('base64url');
     // Extend TTL so the user has up to 15 minutes to finish Step 2 (Kortix sign-in).
     const claimExpiresAt = new Date(Date.now() + 15 * 60_000);
 
-    await db
+    const approvedRows = await db
       .update(daytonaConnectFlows)
       .set({
         status: 'approved',
         encryptedApiKey: encrypted.encryptedApiKey,
         encryptionIv: encrypted.encryptionIv,
         encryptionTag: encrypted.encryptionTag,
+        daytonaKeyName: mintedKey.keyName,
         daytonaOrgId: org.id,
         daytonaRegion: region,
         claimToken,
         expiresAt: claimExpiresAt,
         updatedAt: new Date(),
       })
-      .where(eq(daytonaConnectFlows.flowId, flowId));
+      .where(
+        and(
+          eq(daytonaConnectFlows.flowId, flowId),
+          eq(daytonaConnectFlows.status, 'exchanging'),
+        ),
+      )
+      .returning();
 
-    // Fire-and-forget: kick off the 6 GB GHCR snapshot pull strictly asynchronously
-    // AFTER returning approved, so /poll never blocks or fails on snapshot creation.
+    if (approvedRows.length === 0) {
+      const reread = await db
+        .select()
+        .from(daytonaConnectFlows)
+        .where(eq(daytonaConnectFlows.flowId, flowId))
+        .limit(1);
+      if (reread[0]) {
+        const settled = toPollResultFromFlow(reread[0]);
+        if (settled) return settled;
+      }
+    }
+
+    // Fire-and-forget: kick off the GHCR snapshot pull strictly asynchronously
+    // IMMEDIATELY at Daytona approval, so /poll never blocks and the image is
+    // already warming before Step 2 finishes.
     setImmediate(() => {
       void ensureUserSnapshot({
-        apiKey: permanentApiKey,
+        apiKey: mintedKey.apiKey,
         daytonaOrgId: org.id,
         daytonaRegion: region,
       }).catch((err) => {
-        console.warn(
-          '[daytona-onboarding] background pre-claim snapshot pull failed:',
-          err instanceof Error ? err.message : String(err),
-        );
+        logger.warn('[daytona-onboarding] background pre-claim snapshot pull failed', {
+          orgId: org.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
     });
 
@@ -1555,6 +1862,16 @@ export interface DaytonaOnboardingStatusResult {
   snapshotErrorCode: DaytonaOnboardingErrorCode | null;
   snapshotError: string | null;
   reconnectRequired?: boolean;
+  previousOrgId?: string | null;
+  orgSwitched?: boolean;
+  warning?: string | null;
+}
+
+function buildOrgSwitchWarning(previousOrgId: string, newOrgId: string): string {
+  return (
+    `Connected a different Daytona organization (${newOrgId.slice(0, 8)}..., replacing ${previousOrgId.slice(0, 8)}...). ` +
+    'Sessions created under your previous Daytona workspace will remain unreachable until you reconnect that account.'
+  );
 }
 
 export async function claimDaytonaConnect(
@@ -1594,9 +1911,25 @@ export async function claimDaytonaConnect(
   const region = flow.daytonaRegion || config.DAYTONA_TARGET || 'eu';
   const pinnedImg = getPinnedGhcrSandboxImage();
   const initialSnapshotName = pinnedImg ? deriveSnapshotNameForImage(pinnedImg) : null;
+  const ttlDays = config.KORTIX_DAYTONA_KEY_TTL_DAYS || 0;
+  const keyExpiresAt = ttlDays > 0 ? new Date(Date.now() + ttlDays * 86_400_000) : null;
+
+  let previousOrgId: string | null = null;
+  let orgSwitched = false;
 
   // Atomically claim the flow (clearing its temporary key copy) and bind to user_daytona_credentials.
   await db.transaction(async (tx) => {
+    const existingCreds = await tx
+      .select({ daytonaOrgId: userDaytonaCredentials.daytonaOrgId })
+      .from(userDaytonaCredentials)
+      .where(eq(userDaytonaCredentials.userId, userId))
+      .limit(1);
+    const priorOrg = existingCreds[0]?.daytonaOrgId ?? null;
+    if (priorOrg && priorOrg !== flow.daytonaOrgId) {
+      previousOrgId = priorOrg;
+      orgSwitched = true;
+    }
+
     const claimed = await tx
       .update(daytonaConnectFlows)
       .set({
@@ -1626,10 +1959,16 @@ export async function claimDaytonaConnect(
         encryptionTag: userEncrypted.encryptionTag,
         daytonaOrgId: flow.daytonaOrgId!,
         daytonaRegion: region,
+        daytonaKeyName: flow.daytonaKeyName ?? null,
+        daytonaKeyExpiresAt: keyExpiresAt,
+        previousDaytonaOrgId: orgSwitched ? previousOrgId : null,
+        previousOrgReplacedAt: orgSwitched ? now : null,
         snapshotName: initialSnapshotName,
         snapshotStatus: 'pulling',
         snapshotError: null,
-        updatedAt: new Date(),
+        snapshotAttempts: 0,
+        snapshotNextRetryAt: null,
+        updatedAt: now,
       })
       .onConflictDoUpdate({
         target: userDaytonaCredentials.userId,
@@ -1639,18 +1978,36 @@ export async function claimDaytonaConnect(
           encryptionTag: userEncrypted.encryptionTag,
           daytonaOrgId: flow.daytonaOrgId!,
           daytonaRegion: region,
+          daytonaKeyName: flow.daytonaKeyName ?? null,
+          daytonaKeyExpiresAt: keyExpiresAt,
+          ...(orgSwitched
+            ? {
+                previousDaytonaOrgId: previousOrgId,
+                previousOrgReplacedAt: now,
+              }
+            : {}),
           snapshotName: initialSnapshotName,
           snapshotStatus: 'pulling',
           snapshotError: null,
-          updatedAt: new Date(),
+          snapshotAttempts: 0,
+          snapshotNextRetryAt: null,
+          updatedAt: now,
         },
       });
   });
 
-  invalidateUserDaytonaCache(userId);
+  if (orgSwitched && previousOrgId) {
+    logger.warn('[daytona-onboarding] user switched Daytona organization during claim', {
+      userId,
+      previousOrgId,
+      newOrgId: flow.daytonaOrgId,
+    });
+  }
 
-  // Trigger snapshot pull strictly asynchronously so /claim returns immediately
-  // and the client transitions smoothly into the live 3-stage setup progress screen.
+  invalidateUserDaytonaCache(userId);
+  const warning = orgSwitched && previousOrgId ? buildOrgSwitchWarning(previousOrgId, flow.daytonaOrgId) : null;
+
+  // Trigger snapshot pull strictly asynchronously so /claim returns immediately.
   const verifiedCacheKey = initialSnapshotName ? `${flow.daytonaOrgId}:${initialSnapshotName}` : null;
   const alreadyActive =
     verifiedCacheKey !== null &&
@@ -1672,6 +2029,9 @@ export async function claimDaytonaConnect(
       snapshotErrorCode: null,
       snapshotError: null,
       reconnectRequired: false,
+      previousOrgId,
+      orgSwitched,
+      warning,
     };
   }
 
@@ -1682,10 +2042,11 @@ export async function claimDaytonaConnect(
       daytonaOrgId: flow.daytonaOrgId!,
       daytonaRegion: region,
     }).catch((err) => {
-      console.warn(
-        '[daytona-onboarding] post-claim background snapshot pull failed:',
-        err instanceof Error ? err.message : String(err),
-      );
+      logger.warn('[daytona-onboarding] post-claim background snapshot pull failed', {
+        userId,
+        orgId: flow.daytonaOrgId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
   });
 
@@ -1698,6 +2059,9 @@ export async function claimDaytonaConnect(
     snapshotErrorCode: null,
     snapshotError: null,
     reconnectRequired: false,
+    previousOrgId,
+    orgSwitched,
+    warning,
   };
 }
 
@@ -1841,8 +2205,10 @@ export async function saveManualDaytonaKey(
   }
 
   const curBody = (await curRes.json().catch(() => ({}))) as {
+    name?: string;
     organizationId?: string;
     permissions?: string[];
+    expiresAt?: string | null;
   };
   const snapBody = (await snapRes.json().catch(() => ({}))) as {
     items?: Array<{ organizationId?: string; regionIds?: string[] }>;
@@ -1868,9 +2234,23 @@ export async function saveManualDaytonaKey(
     config.DAYTONA_TARGET ||
     'eu';
 
+  const detectedKeyName = typeof curBody.name === 'string' && curBody.name.trim() ? curBody.name.trim() : null;
+  const detectedKeyExpiresAt =
+    typeof curBody.expiresAt === 'string' && curBody.expiresAt ? new Date(curBody.expiresAt) : null;
+
   const encrypted = encryptDaytonaApiKey(userId, apiKey);
   const pinnedImg = getPinnedGhcrSandboxImage();
   const initialSnapshotName = pinnedImg ? deriveSnapshotNameForImage(pinnedImg) : null;
+  const now = new Date();
+
+  const existingCreds = await db
+    .select({ daytonaOrgId: userDaytonaCredentials.daytonaOrgId })
+    .from(userDaytonaCredentials)
+    .where(eq(userDaytonaCredentials.userId, userId))
+    .limit(1);
+  const priorOrg = existingCreds[0]?.daytonaOrgId ?? null;
+  const orgSwitched = Boolean(priorOrg && priorOrg !== detectedOrgId);
+  const previousOrgId = orgSwitched ? priorOrg : null;
 
   await db
     .insert(userDaytonaCredentials)
@@ -1881,10 +2261,16 @@ export async function saveManualDaytonaKey(
       encryptionTag: encrypted.encryptionTag,
       daytonaOrgId: detectedOrgId,
       daytonaRegion: detectedRegion,
+      daytonaKeyName: detectedKeyName,
+      daytonaKeyExpiresAt: detectedKeyExpiresAt,
+      previousDaytonaOrgId: previousOrgId,
+      previousOrgReplacedAt: orgSwitched ? now : null,
       snapshotName: initialSnapshotName,
       snapshotStatus: 'pulling',
       snapshotError: null,
-      updatedAt: new Date(),
+      snapshotAttempts: 0,
+      snapshotNextRetryAt: null,
+      updatedAt: now,
     })
     .onConflictDoUpdate({
       target: userDaytonaCredentials.userId,
@@ -1894,14 +2280,33 @@ export async function saveManualDaytonaKey(
         encryptionTag: encrypted.encryptionTag,
         daytonaOrgId: detectedOrgId,
         daytonaRegion: detectedRegion,
+        daytonaKeyName: detectedKeyName,
+        daytonaKeyExpiresAt: detectedKeyExpiresAt,
+        ...(orgSwitched
+          ? {
+              previousDaytonaOrgId: previousOrgId,
+              previousOrgReplacedAt: now,
+            }
+          : {}),
         snapshotName: initialSnapshotName,
         snapshotStatus: 'pulling',
         snapshotError: null,
-        updatedAt: new Date(),
+        snapshotAttempts: 0,
+        snapshotNextRetryAt: null,
+        updatedAt: now,
       },
     });
 
+  if (orgSwitched && previousOrgId) {
+    logger.warn('[daytona-onboarding] user switched Daytona organization via manual-key', {
+      userId,
+      previousOrgId,
+      newOrgId: detectedOrgId,
+    });
+  }
+
   invalidateUserDaytonaCache(userId);
+  const warning = orgSwitched && previousOrgId ? buildOrgSwitchWarning(previousOrgId, detectedOrgId) : null;
 
   const verifiedCacheKey = initialSnapshotName ? `${detectedOrgId}:${initialSnapshotName}` : null;
   const alreadyActive =
@@ -1924,6 +2329,9 @@ export async function saveManualDaytonaKey(
       snapshotErrorCode: null,
       snapshotError: null,
       reconnectRequired: false,
+      previousOrgId,
+      orgSwitched,
+      warning,
     };
   }
 
@@ -1936,10 +2344,11 @@ export async function saveManualDaytonaKey(
       daytonaOrgId: detectedOrgId,
       daytonaRegion: detectedRegion,
     }).catch((err) => {
-      console.warn(
-        '[daytona-onboarding] background manual-key snapshot pull failed:',
-        err instanceof Error ? err.message : String(err),
-      );
+      logger.warn('[daytona-onboarding] background manual-key snapshot pull failed', {
+        userId,
+        orgId: detectedOrgId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
   });
 
@@ -1952,13 +2361,259 @@ export async function saveManualDaytonaKey(
     snapshotErrorCode: null,
     snapshotError: null,
     reconnectRequired: false,
+    previousOrgId,
+    orgSwitched,
+    warning,
   };
 }
 
-export async function disconnectUserDaytona(userId: string): Promise<void> {
-  if (!hasDatabase) return;
-  await db
-    .delete(userDaytonaCredentials)
-    .where(eq(userDaytonaCredentials.userId, userId));
+async function revokeDaytonaApiKeyBestEffort(
+  apiKey: string,
+  orgId: string,
+  keyName: string | null,
+): Promise<{ revoked: boolean; status: number | null }> {
+  if (!keyName) return { revoked: false, status: null };
+  const base = daytonaApiBaseUrl();
+  try {
+    const res = await fetch(`${base}/api-keys/${encodeURIComponent(keyName)}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'X-Daytona-Organization-ID': orgId,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
+    });
+    if (res.ok || res.status === 404) {
+      return { revoked: true, status: res.status };
+    }
+    logger.warn('[daytona-onboarding] Daytona API key revoke returned non-ok status', {
+      orgId,
+      keyName,
+      status: res.status,
+    });
+    return { revoked: false, status: res.status };
+  } catch (err) {
+    logger.warn('[daytona-onboarding] Daytona API key revoke request failed', {
+      orgId,
+      keyName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { revoked: false, status: null };
+  }
+}
+
+export interface DisconnectDaytonaResult {
+  disconnected: boolean;
+  stoppedSandboxes: number;
+  keyRevoked: boolean;
+}
+
+/**
+ * Cleanly disconnect a user's Daytona account:
+ * 1. Stop (never delete) all active/provisioning sandboxes owned by this user
+ *    in their Daytona org.
+ * 2. Attempt to revoke their Daytona API key via Daytona API.
+ * 3. Delete the user_daytona_credentials row and clear all replica caches.
+ */
+export async function disconnectUserDaytona(userId: string): Promise<DisconnectDaytonaResult> {
+  if (!hasDatabase) {
+    invalidateUserDaytonaCache(userId);
+    return { disconnected: true, stoppedSandboxes: 0, keyRevoked: false };
+  }
+
+  let stoppedSandboxes = 0;
+  let keyRevoked = false;
+
+  const rows = await db
+    .select()
+    .from(userDaytonaCredentials)
+    .where(eq(userDaytonaCredentials.userId, userId))
+    .limit(1);
+  const row = rows[0];
+
+  if (row) {
+    let apiKey: string | null = null;
+    try {
+      apiKey = decryptDaytonaApiKey(userId, {
+        encryptedApiKey: row.encryptedApiKey,
+        encryptionIv: row.encryptionIv,
+        encryptionTag: row.encryptionTag,
+      });
+    } catch {
+      apiKey = null;
+    }
+
+    if (apiKey) {
+      // 1. Stop (never delete) this user's active Daytona sandboxes.
+      try {
+        const activeRows = await db
+          .select({ externalId: sessionSandboxes.externalId })
+          .from(sessionSandboxes)
+          .where(
+            and(
+              eq(sessionSandboxes.provider, 'daytona'),
+              inArray(sessionSandboxes.status, ['active', 'provisioning']),
+              isNotNull(sessionSandboxes.externalId),
+              or(
+                sql`${sessionSandboxes.metadata}->>'daytonaOwnerUserId' = ${userId}`,
+                sql`${sessionSandboxes.metadata}->>'provisionedBy' = ${userId}`,
+              ),
+              or(
+                sql`${sessionSandboxes.metadata}->>'daytonaOrgId' = ${row.daytonaOrgId}`,
+                sql`${sessionSandboxes.metadata}->>'daytonaOrgId' IS NULL`,
+              ),
+            ),
+          )
+          .limit(50);
+
+        for (const sb of activeRows) {
+          if (!sb.externalId) continue;
+          const stopped = await stopDaytonaSandboxById(sb.externalId, apiKey);
+          if (stopped) stoppedSandboxes += 1;
+        }
+      } catch (err) {
+        logger.warn('[daytona-onboarding] failed stopping sandboxes during disconnect', {
+          userId,
+          orgId: row.daytonaOrgId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      // 2. Resolve key name if missing (legacy row), then attempt revocation.
+      let keyName = row.daytonaKeyName ?? null;
+      if (!keyName) {
+        try {
+          const curRes = await fetch(`${daytonaApiBaseUrl()}/api-keys/current`, {
+            headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+            signal: AbortSignal.timeout(DAYTONA_HTTP_TIMEOUT_MS),
+          });
+          if (curRes.ok) {
+            const curBody = (await curRes.json().catch(() => ({}))) as { name?: string };
+            if (typeof curBody.name === 'string' && curBody.name.trim()) {
+              keyName = curBody.name.trim();
+            }
+          }
+        } catch {
+          // Best-effort lookup only.
+        }
+      }
+      const revokeRes = await revokeDaytonaApiKeyBestEffort(apiKey, row.daytonaOrgId, keyName);
+      keyRevoked = revokeRes.revoked;
+    }
+
+    // 3. Delete credentials row and clear caches.
+    await db
+      .delete(userDaytonaCredentials)
+      .where(eq(userDaytonaCredentials.userId, userId));
+  }
+
   invalidateUserDaytonaCache(userId);
+  return { disconnected: true, stoppedSandboxes, keyRevoked };
+}
+
+/**
+ * Leader-only reaper for expired/unclaimed Daytona connect flows:
+ * - Revokes unclaimed keys (if not referenced by user_daytona_credentials)
+ * - Scrubs encrypted temporary keys and transitions expired flows -> 'expired'
+ * - Recovers stuck 'exchanging' flows older than EXCHANGING_STALE_MS.
+ */
+export async function reapExpiredDaytonaConnectFlowsOnce(): Promise<{
+  expired: number;
+  keysRevoked: number;
+  recoveredExchanging: number;
+}> {
+  if (!hasDatabase) return { expired: 0, keysRevoked: 0, recoveredExchanging: 0 };
+  const now = new Date();
+  let expired = 0;
+  let keysRevoked = 0;
+  let recoveredExchanging = 0;
+
+  // 1. Reclaim stuck 'exchanging' flows whose replica died before completion.
+  const staleExchangeCutoff = new Date(Date.now() - EXCHANGING_STALE_MS);
+  const stuckRows = await db
+    .update(daytonaConnectFlows)
+    .set({ status: 'pending', updatedAt: now })
+    .where(
+      and(
+        eq(daytonaConnectFlows.status, 'exchanging'),
+        lt(daytonaConnectFlows.updatedAt, staleExchangeCutoff),
+        gt(daytonaConnectFlows.expiresAt, now),
+      ),
+    )
+    .returning({ flowId: daytonaConnectFlows.flowId });
+  recoveredExchanging = stuckRows.length;
+
+  // 2. Find expired pending/exchanging/approved flows.
+  const expiredFlows = await db
+    .select()
+    .from(daytonaConnectFlows)
+    .where(
+      and(
+        inArray(daytonaConnectFlows.status, ['pending', 'exchanging', 'approved']),
+        lt(daytonaConnectFlows.expiresAt, now),
+      ),
+    )
+    .limit(50);
+
+  for (const flow of expiredFlows) {
+    if (
+      flow.status === 'approved' &&
+      flow.encryptedApiKey &&
+      flow.encryptionIv &&
+      flow.encryptionTag &&
+      flow.daytonaOrgId &&
+      flow.daytonaKeyName
+    ) {
+      // Never revoke a key that was somehow already claimed into user_daytona_credentials.
+      const stillReferenced = await db
+        .select({ userId: userDaytonaCredentials.userId })
+        .from(userDaytonaCredentials)
+        .where(
+          and(
+            eq(userDaytonaCredentials.daytonaOrgId, flow.daytonaOrgId),
+            eq(userDaytonaCredentials.daytonaKeyName, flow.daytonaKeyName),
+          ),
+        )
+        .limit(1);
+      if (stillReferenced.length === 0) {
+        try {
+          const plaintext = decryptDaytonaApiKey(flow.flowId, {
+            encryptedApiKey: flow.encryptedApiKey,
+            encryptionIv: flow.encryptionIv,
+            encryptionTag: flow.encryptionTag,
+          });
+          const res = await revokeDaytonaApiKeyBestEffort(
+            plaintext,
+            flow.daytonaOrgId,
+            flow.daytonaKeyName,
+          );
+          if (res.revoked) keysRevoked += 1;
+        } catch {
+          // Best-effort decryption/revocation; still scrub and expire below.
+        }
+      }
+    }
+
+    const updated = await db
+      .update(daytonaConnectFlows)
+      .set({
+        status: 'expired',
+        encryptedApiKey: null,
+        encryptionIv: null,
+        encryptionTag: null,
+        claimToken: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(daytonaConnectFlows.flowId, flow.flowId),
+          inArray(daytonaConnectFlows.status, ['pending', 'exchanging', 'approved']),
+        ),
+      )
+      .returning({ flowId: daytonaConnectFlows.flowId });
+    if (updated.length > 0) expired += 1;
+  }
+
+  return { expired, keysRevoked, recoveredExchanging };
 }

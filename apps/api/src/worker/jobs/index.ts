@@ -55,6 +55,7 @@ import { startTunnelForwardExpiry, stopTunnelForwardExpiry } from './tunnel-forw
 import { startWorkspaceIdFillWorker, stopWorkspaceIdFillWorker } from './workspace-id-fill';
 import { startWorkspaceSplitWorker, stopWorkspaceSplitWorker } from './workspace-split';
 import { startLegacyCredentialBackfillWorker, stopLegacyCredentialBackfillWorker } from './legacy-credential-backfill';
+import { startDaytonaFlowReaper, stopDaytonaFlowReaper } from './daytona-flow-reaper';
 
 import { startSalesOutbox, stopSalesOutbox } from './sales-outbox';
 
@@ -156,4 +157,6 @@ export const JOBS: readonly Job[] = [
   { ticks: { 'workspace-split': 8 * HOUR }, start: startWorkspaceSplitWorker, stop: stopWorkspaceSplitWorker },
   // The Release 1 workspace_id fill, batch by batch after the deploy (never the migrate job). Hourly while paused or done.
   { ticks: { 'workspace-id-fill': 3 * HOUR }, start: startWorkspaceIdFillWorker, stop: stopWorkspaceIdFillWorker },
+  // Expired Daytona onboarding flows: revoke unclaimed keys, scrub ciphertext, recover stuck exchanging rows.
+  { ticks: { 'daytona-flow-reaper': 20 * MIN }, start: startDaytonaFlowReaper, stop: stopDaytonaFlowReaper },
 ];

@@ -1,12 +1,17 @@
+import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { config } from '../config';
+import { logger } from '../lib/logger';
 import { supabaseAuth } from '../middleware/auth';
+import { requestClientKey } from '../middleware/client-ip';
 import {
   DaytonaStructuredError,
   claimDaytonaConnect,
   classifyDaytonaError,
   disconnectUserDaytona,
   getDaytonaOnboardingStatus,
+  isDaytonaNotConnectedError,
   isDaytonaReconnectRequiredError,
   pollDaytonaConnect,
   saveManualDaytonaKey,
@@ -26,6 +31,26 @@ const manualKeyBodySchema = z.object({
   region: z.string().trim().min(2).max(32).optional(),
 });
 
+type RouteErrorStatus = 400 | 402 | 403 | 404 | 428 | 429 | 500 | 502 | 503 | 504;
+
+function normalizeStatus(status: number, fallback: RouteErrorStatus): RouteErrorStatus {
+  if (
+    status === 400 ||
+    status === 402 ||
+    status === 403 ||
+    status === 404 ||
+    status === 428 ||
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  ) {
+    return status;
+  }
+  return fallback;
+}
+
 function formatRouteError(
   err: unknown,
   fallbackError: string,
@@ -36,9 +61,22 @@ function formatRouteError(
     code: string;
     message: string;
     reconnectRequired: boolean;
+    retriable: boolean;
   };
-  status: 400 | 404 | 428 | 502 | 503;
+  status: RouteErrorStatus;
 } {
+  if (isDaytonaNotConnectedError(err)) {
+    return {
+      status: 428,
+      body: {
+        error: 'daytona_not_connected',
+        code: 'DAYTONA_NOT_CONNECTED',
+        message: err.message,
+        reconnectRequired: true,
+        retriable: false,
+      },
+    };
+  }
   if (isDaytonaReconnectRequiredError(err)) {
     return {
       status: 428,
@@ -47,21 +85,19 @@ function formatRouteError(
         code: 'DAYTONA_RECONNECT_REQUIRED',
         message: err.message,
         reconnectRequired: true,
+        retriable: false,
       },
     };
   }
   if (err instanceof DaytonaStructuredError) {
-    const httpStatus =
-      err.httpStatus === 400 || err.httpStatus === 404 || err.httpStatus === 502 || err.httpStatus === 503
-        ? err.httpStatus
-        : fallbackStatus;
     return {
-      status: httpStatus,
+      status: normalizeStatus(err.httpStatus, fallbackStatus),
       body: {
         error: fallbackError,
         code: err.code,
         message: err.message,
         reconnectRequired: err.reconnectRequired,
+        retriable: err.retriable,
       },
     };
   }
@@ -74,30 +110,37 @@ function formatRouteError(
         code: 'DAYTONA_TIMEOUT',
         message: 'This Daytona sign-in session expired. Start a new connection to continue.',
         reconnectRequired: false,
+        retriable: true,
       },
     };
   }
-  // Never leak raw upstream JSON strings into UI error copy.
+  // Never leak raw upstream JSON strings or HTTP error bodies into UI error copy.
   if (rawMessage.includes('{') || rawMessage.includes('HTTP ')) {
-    console.warn(`[daytona-routes] ${fallbackError} sanitized raw error:`, rawMessage.slice(0, 300));
+    logger.warn('[daytona-routes] sanitized upstream Daytona error', {
+      fallbackError,
+      rawMessage: rawMessage.slice(0, 300),
+    });
     const classified = classifyDaytonaError(err, rawMessage);
     return {
-      status: fallbackStatus,
+      status: normalizeStatus(classified.httpStatus, fallbackStatus),
       body: {
         error: fallbackError,
         code: classified.code,
         message: classified.message,
         reconnectRequired: classified.reconnectRequired,
+        retriable: classified.retriable,
       },
     };
   }
+  const classified = classifyDaytonaError(err, rawMessage);
   return {
-    status: fallbackStatus,
+    status: normalizeStatus(classified.httpStatus, fallbackStatus),
     body: {
       error: fallbackError,
-      code: 'DAYTONA_SNAPSHOT_FAILED',
-      message: rawMessage || 'Unable to complete Daytona request. Please try again.',
-      reconnectRequired: false,
+      code: classified.code,
+      message: rawMessage || classified.message,
+      reconnectRequired: classified.reconnectRequired,
+      retriable: classified.retriable,
     },
   };
 }
@@ -107,7 +150,12 @@ export const daytonaOnboardingApp = new Hono<{ Variables: { userId?: string } }>
 // Step 1 (public, pre-Kortix-login): Start WorkOS Device Authorization Flow.
 daytonaOnboardingApp.post('/start', async (c) => {
   try {
-    const result = await startDaytonaConnect();
+    const clientKey = requestClientKey(c);
+    const clientIpHash =
+      clientKey && clientKey !== 'unknown'
+        ? createHash('sha256').update(`${clientKey}:${config.API_KEY_SECRET}`).digest('hex')
+        : null;
+    const result = await startDaytonaConnect({ clientIpHash });
     return c.json(result, 200);
   } catch (err) {
     const formatted = formatRouteError(err, 'daytona_connect_start_failed', 502);
@@ -216,6 +264,6 @@ daytonaOnboardingApp.delete('/disconnect', supabaseAuth, async (c) => {
   if (!userId) {
     return c.json({ error: 'unauthorized', message: 'Authentication required' }, 401);
   }
-  await disconnectUserDaytona(userId);
-  return c.json({ disconnected: true }, 200);
+  const result = await disconnectUserDaytona(userId);
+  return c.json(result, 200);
 });

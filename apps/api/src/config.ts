@@ -707,6 +707,10 @@ const envSchema = z.object({
   // Optional dedicated AES-256-GCM master secret for user_daytona_credentials.
   // Falls back to API_KEY_SECRET (HKDF domain-separated) when unset.
   DAYTONA_CREDENTIALS_ENCRYPTION_KEY: optStr,
+  // Optional TTL in days for newly minted per-user Daytona API keys (0 = no expiry).
+  KORTIX_DAYTONA_KEY_TTL_DAYS: optInt(0),
+  // Maximum concurrent active Daytona Device-Flow onboarding sessions per client IP.
+  KORTIX_DAYTONA_MAX_ACTIVE_FLOWS_PER_IP: optInt(5),
   // Org-level Daytona webhook signing secret (Svix `whsec_…`). When set, the
   // /v1/billing/webhooks/daytona endpoint closes compute billing the instant a
   // box stops; the reaper sweep is the backstop, so this is optional.
@@ -1697,6 +1701,8 @@ export const config = {
   DAYTONA_TARGET: env.DAYTONA_TARGET,
   KORTIX_SANDBOX_GHCR_IMAGE: env.KORTIX_SANDBOX_GHCR_IMAGE,
   DAYTONA_CREDENTIALS_ENCRYPTION_KEY: env.DAYTONA_CREDENTIALS_ENCRYPTION_KEY,
+  KORTIX_DAYTONA_KEY_TTL_DAYS: Math.max(0, env.KORTIX_DAYTONA_KEY_TTL_DAYS),
+  KORTIX_DAYTONA_MAX_ACTIVE_FLOWS_PER_IP: Math.max(1, env.KORTIX_DAYTONA_MAX_ACTIVE_FLOWS_PER_IP),
   DAYTONA_WEBHOOK_SECRET: env.DAYTONA_WEBHOOK_SECRET,
   KORTIX_SNAPSHOT_REAP_PREDECESSOR: env.KORTIX_SNAPSHOT_REAP_PREDECESSOR,
   KORTIX_DRIVES_SESSION_MOUNT: env.KORTIX_DRIVES_SESSION_MOUNT,
