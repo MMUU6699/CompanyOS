@@ -607,14 +607,18 @@ export class DaytonaProvider implements SandboxProvider {
     };
     assertWorkloadCredential(this.name, opts, envVars);
 
+    const sessionIdFromEnv =
+      typeof envVars.KORTIX_SESSION_ID === 'string' && envVars.KORTIX_SESSION_ID.length > 0
+        ? envVars.KORTIX_SESSION_ID
+        : undefined;
     const ownerResolution = await resolveDaytonaContextForOwner({
       userId: opts.userId,
       accountId: opts.accountId,
-      sessionId: typeof opts.metadata?.session_id === 'string' ? opts.metadata.session_id : undefined,
+      sessionId: sessionIdFromEnv,
     });
     const { daytona, userCtx } = resolveDaytonaClientOrThrow(ownerResolution, {
       op: 'create',
-      sessionId: typeof opts.metadata?.session_id === 'string' ? opts.metadata.session_id : undefined,
+      sessionId: sessionIdFromEnv,
     });
 
     // Resolve the snapshot to boot from:

@@ -203,10 +203,10 @@ describe('DaytonaProvider per-user key isolation (Phase 1)', () => {
     expect(provider).toBeInstanceOf(DaytonaProvider);
 
     const created = await provider.create({
+      name: 'test-sb-1',
       userId: 'user-123',
       accountId: 'acct-1',
       envVars: { KORTIX_TOKEN: 'tok', KORTIX_SESSION_ID: 'sess-1' },
-      metadata: { session_id: 'sess-1' },
     });
     expect(created.externalId).toBe('sbx-user-created');
     expect(created.metadata?.daytonaOrgId).toBe('org-user-123');
@@ -247,6 +247,7 @@ describe('DaytonaProvider per-user key isolation (Phase 1)', () => {
     await expect(provider.start('sbx-err-1')).rejects.toThrow('connection refused');
     await expect(
       provider.create({
+        name: 'test-sb-err',
         userId: 'user-123',
         accountId: 'acct-1',
         envVars: { KORTIX_TOKEN: 'tok', KORTIX_SESSION_ID: 'sess-err' },
@@ -284,6 +285,7 @@ describe('DaytonaProvider per-user key isolation (Phase 1)', () => {
     await expect(provider.remove('sbx-unconn-1')).rejects.toBeInstanceOf(DaytonaNotConnectedError);
     await expect(
       provider.create({
+        name: 'test-sb-unconn',
         userId: 'user-unconnected',
         accountId: 'acct-1',
         snapshot: 'legacy-snap',

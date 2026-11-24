@@ -849,8 +849,9 @@ describe('bootstrapLegacyRuntime — dead daemon on a running box', () => {
     const first = await bootstrapLegacyRuntime(input(null, 'daytona'), deps);
     expect(first.outcome).toBe('skipped-unsupported');
     expect(calls.execs).toHaveLength(1);
-    expect(calls.audits.at(-1)?.outcome).toBe('success');
-    expect(calls.audits.at(-1)?.phase).toBe('unsupported');
+    const lastAudit = calls.audits.at(-1) as { outcome?: string; phase?: string } | undefined;
+    expect(lastAudit?.outcome).toBe('success');
+    expect(lastAudit?.phase).toBe('unsupported');
     const savedMetadata = calls.patches.at(-1)!;
     expect((savedMetadata[LEGACY_BOOTSTRAP_METADATA_KEY] as { state: string }).state).toBe('unsupported');
     expect(describeLegacyBootstrapRetry(savedMetadata, 42, 0).status).toBe('unsupported');
