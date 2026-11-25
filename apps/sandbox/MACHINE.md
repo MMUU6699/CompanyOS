@@ -51,8 +51,8 @@ The user watches it live in the session's **Desktop** panel, streamed from
 port 6901.
 
 - `DISPLAY=:1` is set, so any GUI program you start opens on the desktop.
-- `agent-browser` runs headed (`AGENT_BROWSER_HEADED=true`): the user sees
-  every page you open.
+- `agent-browser` runs headed by default (`AGENT_BROWSER_HEADED=true`): the user watches every page live. Never pass `AGENT_BROWSER_HEADED=false` or `--headed false`; if `kortix-desktop status` reports the desktop is down, repair it with `KORTIX_DESKTOP_SESSION_DELAY_S=0 kortix-desktop start` before opening a URL.
+- **Daytona plan network egress:** on Daytona Tier 1/2 plans, direct sandbox egress allows developer hosts (`github.com`, `npmjs.org`, `pypi.org`, `localhost`) and resets general public hosts (`google.com`, `example.com`) with `ERR_QUIC_PROTOCOL_ERROR` / `Connection reset by peer`. Never loop or try to bypass it; report `"network restricted by your Daytona plan: <host>"` and suggest allowed hosts or cloud-proxied `web_search` / `scrape_webpage`.
 - The desktop has one browser, yours. The dock's browser icon and every
   `xdg-open <url>` open your default `agent-browser` session, so the user
   shares your window, tabs and logins. To have the user sign in to a site,
