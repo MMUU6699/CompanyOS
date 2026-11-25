@@ -1,29 +1,38 @@
 /**
- * ComputerSheet — host-gated Kortix bottom sheet showing the session
- * computer's live tool steps (Terminal, Browser, Files with line diff, and
- * MCP/connector calls) plus a Prev / Live / Next step timeline.
+ * ComputerSheet — host-gated Kortix bottom sheet for the live session computer.
  *
- * Host-gated mounting (`if (!isOpen) return null`) mirrors `ActivitySheetHost`:
- * `BottomSheetModal` mounts only when open and calls `present()` once on mount.
- * Never calls `dismiss()` before `present()` (which previously locked
- * `@gorhom/bottom-sheet` in `MODAL_STATUS.DISMISSING` so taps opened nothing).
+ * - Host-gated mounting (`if (!isOpen) return null`) guarantees `BottomSheetModal`
+ *   calls `present()` once on mount and never `dismiss()` before `present()`.
+ * - Title: `<agent>'s computer`.
+ * - Mode switcher: `Live view` (proxied voxl `:6901` desktop inside
+ *   `react-native-webview` with `authenticatedRequest`, loading/502/503/reconnect,
+ *   unmounted on close or background, transparent shield + Take control / Open
+ *   full screen) and `Steps` (Terminal monospace scroll-pause, Browser history
+ *   frame + collapsed Details, Files line diff, Tool/MCP + collapsed Details).
+ * - Raw accessibility trees / verbose outputs never flood the viewport; they
+ *   stay inside a collapsed `Details` disclosure.
+ * - "Open preview" renders ONLY when `isLocalhostPreviewUrl(step.url)` is true.
  */
 
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AppState,
   BackHandler,
   Image,
   Linking,
   Pressable,
   View,
+  type AppStateStatus,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from 'react-native';
+import { WebView } from 'react-native-webview';
 import type { BottomSheetModal } from '@gorhom/bottom-sheet';
 import { useColorScheme } from 'nativewind';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import type { SessionLogTurn } from '@kortix/sdk';
+import { authenticatedRequest, type SessionLogTurn } from '@kortix/sdk';
+import { API_URL } from '@/api/config';
 import { KortixLoader } from '@/components/kortix/kortix-loader';
 import { KortixBottomSheetModal, SheetTitleRow } from '@/components/kortix/sheet';
 import { SheetScrollView } from '@/components/kortix/sheet-parts';
@@ -38,12 +47,17 @@ import { useSandboxReachability } from '@/hooks/useSandboxReachability';
 import { haptics } from '@/lib/haptics';
 import { useOnlineStatus } from '@/lib/network/use-online-status';
 import {
+  ArrowCounterClockwiseIcon,
   ArrowSquareOutIcon,
+  CaretDownIcon,
   CaretLeftIcon,
   CaretRightIcon,
+  CaretUpIcon,
   CpuIcon,
   FileCodeIcon,
   GlobeIcon,
+  LockIcon,
+  LockOpenIcon,
   MonitorIcon,
   TerminalWindowIcon,
   WarningCircleIcon,
@@ -54,19 +68,24 @@ import { notifyDaytonaReconnectRequired } from '@/lib/onboarding/daytona-client'
 import { isScrollPinnedToEnd } from '@/lib/session/activity';
 import {
   deriveComputerState,
+  formatComputerSheetCaption,
   getComputerCopy,
+  isLocalhostPreviewUrl,
   resolveComputerStepIndex,
   type ComputerCopy,
   type ComputerStep,
   type ComputerSurface,
 } from '@/lib/session/computer-steps';
+import { allowBrowserNavigation, isTrustedProxyUrl } from '@/lib/utils/html-embed';
 import { THEME } from '@/lib/utils/theme';
 import { useComputerSheetStore } from '@/stores/computer-sheet-store';
 import { useTabStore } from '@/stores/tab-store';
 import { useToolPreviewStore } from '@/stores/tool-preview-store';
 
 const DAYTONA_BILLING_URL = 'https://app.daytona.io/dashboard/billing';
-const SNAP_POINTS = ['90%'];
+const SNAP_POINTS = ['92%'];
+
+type SheetMode = 'live' | 'steps';
 
 const SURFACE_ICONS: Record<ComputerSurface, AppIcon> = {
   terminal: TerminalWindowIcon,
@@ -80,18 +99,20 @@ export interface ComputerSheetProps {
   turns: ReadonlyArray<SessionLogTurn>;
   isBusy: boolean;
   sandboxUrl?: string;
+  agentName?: string;
 }
 
-/**
- * Host component mounted once per session screen. Mounts the actual
- * `BottomSheetModal` ONLY when this session's sheet is open so `present()`
- * fires cleanly every time the dock is tapped.
- */
-function ComputerSheetHostImpl({ sessionId, turns, isBusy, sandboxUrl }: ComputerSheetProps) {
+function ComputerSheetHostImpl({
+  sessionId,
+  turns,
+  isBusy,
+  sandboxUrl,
+  agentName,
+}: ComputerSheetProps) {
   const isOpen = useComputerSheetStore((s) => s.openSessionId === sessionId);
+  const initialTab = useComputerSheetStore((s) => s.initialTab);
   const closeComputer = useComputerSheetStore((s) => s.closeComputer);
 
-  // Close the sheet if the user navigates to another session or page tab.
   useEffect(
     () =>
       useTabStore.subscribe((state, previous) => {
@@ -107,7 +128,6 @@ function ComputerSheetHostImpl({ sessionId, turns, isBusy, sandboxUrl }: Compute
     [closeComputer, sessionId],
   );
 
-  // Never outlive the owning session screen.
   useEffect(
     () => () => {
       if (useComputerSheetStore.getState().openSessionId === sessionId) {
@@ -125,6 +145,8 @@ function ComputerSheetHostImpl({ sessionId, turns, isBusy, sandboxUrl }: Compute
       turns={turns}
       isBusy={isBusy}
       sandboxUrl={sandboxUrl}
+      agentName={agentName}
+      initialMode={initialTab === 'desktop' ? 'live' : 'steps'}
       onClose={closeComputer}
     />
   );
@@ -139,8 +161,10 @@ function ComputerSheetModal({
   turns,
   isBusy,
   sandboxUrl,
+  agentName,
+  initialMode,
   onClose,
-}: ComputerSheetProps & { onClose: () => void }) {
+}: ComputerSheetProps & { initialMode: SheetMode; onClose: () => void }) {
   const modalRef = useRef<BottomSheetModal>(null);
   const insets = useSafeAreaInsets();
   const { colorScheme } = useColorScheme();
@@ -148,6 +172,7 @@ function ComputerSheetModal({
   const pageBackground = isDark ? THEME.dark.background : THEME.light.background;
 
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  const [mode, setMode] = useState<SheetMode>(initialMode);
 
   // Present once on mount (never dismiss before present).
   useEffect(() => {
@@ -163,7 +188,6 @@ function ComputerSheetModal({
     }
   }, [onClose]);
 
-  // Android hardware back closes the computer sheet cleanly.
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       handleRequestClose();
@@ -196,11 +220,19 @@ function ComputerSheetModal({
     [state.steps, selectedStepId],
   );
 
+  const canShowLiveDesktop = Boolean(state.desktopProxyUrl);
+  const effectiveMode: SheetMode = mode === 'live' && canShowLiveDesktop ? 'live' : 'steps';
+  const title = copy.computerTitleFor(agentName);
+  const caption = formatComputerSheetCaption(agentName, resolved.step, currentLanguage);
+
   const handleStepPrev = useCallback(() => {
     if (resolved.index <= 0) return;
     haptics.tap();
     const target = state.steps[resolved.index - 1];
-    if (target) setSelectedStepId(target.id);
+    if (target) {
+      setSelectedStepId(target.id);
+      setMode('steps');
+    }
   }, [resolved.index, state.steps]);
 
   const handleStepNext = useCallback(() => {
@@ -217,7 +249,14 @@ function ComputerSheetModal({
   const handleJumpLive = useCallback(() => {
     haptics.tap();
     setSelectedStepId(null);
-  }, []);
+    if (state.activeSurface === 'browser' && state.desktopProxyUrl) {
+      setMode('live');
+    }
+  }, [state.activeSurface, state.desktopProxyUrl]);
+
+  const total = state.steps.length;
+  const progressPct = total <= 1 ? 100 : Math.round(((resolved.index + 1) / total) * 100);
+  const CaptionIcon = resolved.step ? SURFACE_ICONS[resolved.step.surface] : MonitorIcon;
 
   return (
     <KortixBottomSheetModal
@@ -235,101 +274,454 @@ function ComputerSheetModal({
         style={{ flex: 1, paddingBottom: Math.max(insets.bottom, 12) }}
         className="bg-background"
       >
-        <SheetTitleRow title={copy.computerTitle} onClose={handleRequestClose} />
+        <SheetTitleRow title={title} onClose={handleRequestClose} />
 
-        {state.status === 'offline' ? (
-          <StatusNotice
-            icon={WifiSlashIcon}
-            title={copy.offline}
-            message={copy.offlineHint}
-            copy={copy}
-          />
-        ) : state.status === 'error' && state.error ? (
-          <View className="flex-1 justify-center px-6">
-            <View className="gap-3 rounded-3xl border border-border bg-card p-4">
-              <View className="flex-row items-center gap-2">
-                <Icon as={WarningCircleIcon} size={18} color={THEME.accent.red} />
-                <Text className="flex-1 text-[15px] font-roobert-medium text-foreground">
-                  {state.error.title}
-                </Text>
-              </View>
-              <Text className="text-[13px] leading-5 text-muted-foreground">
-                {state.error.message}
-              </Text>
-              <View className="flex-row gap-2 pt-1">
-                {state.error.action === 'reconnect' ? (
-                  <Button
-                    variant="default"
-                    size="sm"
-                    className="flex-1 rounded-full"
+        {/* Mode switcher (Live desktop view vs Steps inspector) */}
+        {canShowLiveDesktop && state.status !== 'offline' && state.status !== 'error' ? (
+          <View className="px-4 pb-2.5">
+            <View
+              className={
+                copy.isRtl
+                  ? 'flex-row-reverse rounded-full border border-border bg-muted/40 p-1'
+                  : 'flex-row rounded-full border border-border bg-muted/40 p-1'
+              }
+            >
+              {(
+                [
+                  { id: 'live', label: copy.modeLive, icon: MonitorIcon },
+                  { id: 'steps', label: copy.modeSteps, icon: TerminalWindowIcon },
+                ] as const
+              ).map((tab) => {
+                const selected = effectiveMode === tab.id;
+                return (
+                  <Pressable
+                    key={tab.id}
+                    testID={`computer-sheet-mode-${tab.id}`}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected }}
                     onPress={() => {
-                      handleRequestClose();
-                      notifyDaytonaReconnectRequired();
+                      haptics.tap();
+                      setMode(tab.id);
                     }}
+                    className={`flex-1 flex-row items-center justify-center gap-1.5 rounded-full py-1.5 ${
+                      selected ? 'border border-border bg-background' : ''
+                    }`}
                   >
-                    <Text>{copy.reconnectDaytona}</Text>
-                  </Button>
-                ) : state.error.action === 'billing' ? (
-                  <Button
-                    variant="default"
-                    size="sm"
-                    className="flex-1 rounded-full"
-                    onPress={() => void Linking.openURL(DAYTONA_BILLING_URL)}
-                  >
-                    <Text>{copy.openDaytonaBilling}</Text>
-                  </Button>
-                ) : null}
-              </View>
+                    <Icon
+                      as={tab.icon}
+                      size={13}
+                      className={selected ? 'text-foreground' : 'text-muted-foreground'}
+                    />
+                    <Text
+                      className={`text-[12px] ${
+                        selected
+                          ? 'font-roobert-medium text-foreground'
+                          : 'text-muted-foreground'
+                      }`}
+                    >
+                      {tab.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
             </View>
           </View>
-        ) : (
-          <StepsInspectorPane
-            sessionId={sessionId}
-            state={state}
-            resolved={resolved}
-            copy={copy}
-            onPrev={handleStepPrev}
-            onNext={handleStepNext}
-            onJumpLive={handleJumpLive}
-          />
-        )}
+        ) : null}
+
+        {/* Main Viewport (fills the sheet) */}
+        <View style={{ flex: 1 }}>
+          {state.status === 'offline' ? (
+            <StatusNotice
+              icon={WifiSlashIcon}
+              title={copy.offline}
+              message={copy.offlineHint}
+              copy={copy}
+            />
+          ) : state.status === 'error' && state.error ? (
+            <View className="flex-1 justify-center px-6">
+              <View className="gap-3 rounded-3xl border border-border bg-card p-4">
+                <View className="flex-row items-center gap-2">
+                  <Icon as={WarningCircleIcon} size={18} color={THEME.accent.red} />
+                  <Text className="flex-1 text-[15px] font-roobert-medium text-foreground">
+                    {state.error.title}
+                  </Text>
+                </View>
+                <Text className="text-[13px] leading-5 text-muted-foreground">
+                  {state.error.message}
+                </Text>
+                <View className="flex-row gap-2 pt-1">
+                  {state.error.action === 'reconnect' ? (
+                    <Button
+                      variant="default"
+                      size="sm"
+                      className="flex-1 rounded-full"
+                      onPress={() => {
+                        handleRequestClose();
+                        notifyDaytonaReconnectRequired();
+                      }}
+                    >
+                      <Text>{copy.reconnectDaytona}</Text>
+                    </Button>
+                  ) : state.error.action === 'billing' ? (
+                    <Button
+                      variant="default"
+                      size="sm"
+                      className="flex-1 rounded-full"
+                      onPress={() => void Linking.openURL(DAYTONA_BILLING_URL)}
+                    >
+                      <Text>{copy.openDaytonaBilling}</Text>
+                    </Button>
+                  ) : null}
+                </View>
+              </View>
+            </View>
+          ) : effectiveMode === 'live' && state.desktopProxyUrl ? (
+            <LiveDesktopViewport
+              desktopProxyUrl={state.desktopProxyUrl}
+              title={title}
+              pageBackground={pageBackground}
+              copy={copy}
+              networkRestricted={state.networkRestricted}
+              restrictedHost={state.restrictedHost}
+            />
+          ) : (
+            <StepsInspectorPane
+              sessionId={sessionId}
+              state={state}
+              resolved={resolved}
+              copy={copy}
+            />
+          )}
+        </View>
+
+        {/* Bottom Caption + Timeline Scrubber */}
+        {state.status !== 'offline' && state.status !== 'error' ? (
+          <View className="gap-2.5 px-4 pt-3">
+            <View
+              className={
+                copy.isRtl
+                  ? 'flex-row-reverse items-center gap-2'
+                  : 'flex-row items-center gap-2'
+              }
+            >
+              <View className="h-6 w-6 items-center justify-center rounded-lg border border-border bg-card">
+                <Icon as={CaptionIcon} size={13} className="text-muted-foreground" />
+              </View>
+              <Text
+                testID="computer-sheet-caption"
+                className="flex-1 text-[12.5px] font-roobert-medium text-foreground"
+                numberOfLines={1}
+                style={copy.isRtl ? { textAlign: 'right' } : undefined}
+              >
+                {caption}
+              </Text>
+            </View>
+
+            {total > 0 ? (
+              <>
+                <View className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <View
+                    style={{ width: `${progressPct}%` }}
+                    className="h-full rounded-full bg-foreground"
+                  />
+                </View>
+
+                <View
+                  className={
+                    copy.isRtl
+                      ? 'flex-row-reverse items-center justify-between'
+                      : 'flex-row items-center justify-between'
+                  }
+                >
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="rounded-full"
+                    disabled={resolved.index <= 0}
+                    accessibilityLabel="Previous step"
+                    onPress={handleStepPrev}
+                  >
+                    <Icon as={copy.isRtl ? CaretRightIcon : CaretLeftIcon} size={18} />
+                  </Button>
+
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      resolved.isLive ? copy.live : copy.stepOf(resolved.index + 1, total)
+                    }
+                    onPress={resolved.isLive ? undefined : handleJumpLive}
+                    className="flex-row items-center gap-2 rounded-full border border-border bg-card px-3.5 py-1.5 active:opacity-75"
+                  >
+                    <View
+                      style={{
+                        width: 7,
+                        height: 7,
+                        borderRadius: 3.5,
+                        backgroundColor: resolved.isLive
+                          ? THEME.accent.green
+                          : THEME.light.mutedForeground,
+                      }}
+                    />
+                    <Text className="text-[12px] font-roobert-medium tabular-nums text-foreground">
+                      {resolved.isLive ? copy.live : copy.stepOf(resolved.index + 1, total)}
+                    </Text>
+                  </Pressable>
+
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="rounded-full"
+                    disabled={resolved.isLive || resolved.index >= total - 1}
+                    accessibilityLabel="Next step"
+                    onPress={handleStepNext}
+                  >
+                    <Icon as={copy.isRtl ? CaretLeftIcon : CaretRightIcon} size={18} />
+                  </Button>
+                </View>
+              </>
+            ) : null}
+          </View>
+        ) : null}
       </View>
     </KortixBottomSheetModal>
   );
 }
 
-// ─── Steps Inspector + Scrubber ──────────────────────────────────────────────
+// ─── Live Proxied Desktop WebView (voxl :6901) ───────────────────────────────
+
+function LiveDesktopViewport({
+  desktopProxyUrl,
+  title,
+  pageBackground,
+  copy,
+  networkRestricted,
+  restrictedHost,
+}: {
+  desktopProxyUrl: string;
+  title: string;
+  pageBackground: string;
+  copy: ComputerCopy;
+  networkRestricted: boolean;
+  restrictedHost: string | null;
+}) {
+  const openPreview = useToolPreviewStore((s) => s.openPreview);
+  const trusted = isTrustedProxyUrl(desktopProxyUrl, API_URL);
+  const [foreground, setForeground] = useState<boolean>(
+    () => AppState.currentState === 'active',
+  );
+  const [credential, setCredential] = useState<
+    { status: 'loading' } | { status: 'error' } | { status: 'ready'; headers: Record<string, string> }
+  >({ status: 'loading' });
+  const [attempt, setAttempt] = useState(0);
+  const [unreachable, setUnreachable] = useState(false);
+  const [control, setControl] = useState(false);
+
+  // Unmount WebView when app backgrounds so voxl does not stall on an un-acked viewer.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
+      setForeground(next === 'active');
+    });
+    return () => sub.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!trusted || !foreground) return;
+    let alive = true;
+    setCredential({ status: 'loading' });
+    setUnreachable(false);
+    void authenticatedRequest(desktopProxyUrl).then(
+      ({ headers }) => {
+        if (alive) setCredential({ status: 'ready', headers });
+      },
+      () => {
+        if (alive) setCredential({ status: 'error' });
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [desktopProxyUrl, trusted, foreground, attempt]);
+
+  const handleReconnect = useCallback(() => {
+    haptics.tap();
+    setUnreachable(false);
+    setAttempt((n) => n + 1);
+  }, []);
+
+  return (
+    <View testID="computer-live-desktop" style={{ flex: 1 }} className="gap-2 px-4">
+      {networkRestricted ? (
+        <View className="flex-row items-center gap-2 rounded-2xl border border-border bg-card px-3 py-2">
+          <Icon as={WarningCircleIcon} size={14} color={THEME.accent.orange} />
+          <Text className="flex-1 text-[12px] text-foreground" numberOfLines={2}>
+            {copy.networkRestrictedHost(restrictedHost)}
+          </Text>
+        </View>
+      ) : null}
+
+      <View
+        style={{ flex: 1 }}
+        className={`relative overflow-hidden rounded-3xl border bg-card ${
+          control ? 'border-foreground' : 'border-border'
+        }`}
+      >
+        {!trusted || !foreground ? (
+          <View className="flex-1 items-center justify-center">
+            <KortixLoader size="small" />
+          </View>
+        ) : credential.status === 'loading' ? (
+          <View className="flex-1 items-center justify-center">
+            <KortixLoader size="small" />
+          </View>
+        ) : credential.status === 'error' || unreachable ? (
+          <View className="flex-1 items-center justify-center gap-3 px-6">
+            <View className="h-11 w-11 items-center justify-center rounded-2xl border border-border bg-background">
+              <Icon as={MonitorIcon} size={20} className="text-muted-foreground" />
+            </View>
+            <Text className="text-center text-[14px] font-roobert-medium text-foreground">
+              {copy.desktopUnreachableTitle}
+            </Text>
+            <Text variant="muted" className="text-center text-[12.5px] leading-5">
+              {copy.desktopUnreachableHint}
+            </Text>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="rounded-full"
+              onPress={handleReconnect}
+            >
+              <Icon as={ArrowCounterClockwiseIcon} size={13} />
+              <Text className="text-[12px]">{copy.reconnect}</Text>
+            </Button>
+          </View>
+        ) : (
+          <>
+            <WebView
+              key={`voxl-${attempt}`}
+              source={{
+                uri: desktopProxyUrl,
+                headers: credential.headers,
+              }}
+              originWhitelist={['*']}
+              onShouldStartLoadWithRequest={allowBrowserNavigation}
+              onHttpError={(ev) => {
+                if (ev.nativeEvent.statusCode >= 500) setUnreachable(true);
+              }}
+              onError={() => setUnreachable(true)}
+              startInLoadingState
+              renderLoading={() => (
+                <View className="absolute inset-0 items-center justify-center bg-card">
+                  <KortixLoader size="small" />
+                </View>
+              )}
+              javaScriptEnabled
+              domStorageEnabled
+              sharedCookiesEnabled
+              allowsInlineMediaPlayback
+              mediaPlaybackRequiresUserAction={false}
+              style={{ flex: 1, backgroundColor: pageBackground }}
+            />
+
+            {/* Read-only shield by default so sheet gestures never move the agent's cursor */}
+            {!control ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={copy.takeControl}
+                onPress={() => {
+                  haptics.tap();
+                  setControl(true);
+                }}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  right: 0,
+                  bottom: 0,
+                  left: 0,
+                }}
+              />
+            ) : null}
+
+            {/* Floating control bar */}
+            <View
+              pointerEvents="box-none"
+              style={{
+                position: 'absolute',
+                left: 10,
+                right: 10,
+                bottom: 10,
+                flexDirection: copy.isRtl ? 'row-reverse' : 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+              }}
+            >
+              <Button
+                variant={control ? 'default' : 'secondary'}
+                size="sm"
+                className="rounded-full border border-border"
+                onPress={() => {
+                  haptics.tap();
+                  setControl((c) => !c);
+                }}
+              >
+                <Icon as={control ? LockIcon : LockOpenIcon} size={13} />
+                <Text className="text-[12px]">
+                  {control ? copy.returnControl : copy.takeControl}
+                </Text>
+              </Button>
+
+              <Button
+                variant="secondary"
+                size="sm"
+                className="rounded-full border border-border"
+                onPress={() => {
+                  haptics.tap();
+                  openPreview(desktopProxyUrl, title);
+                }}
+              >
+                <Icon as={ArrowSquareOutIcon} size={13} />
+                <Text className="text-[12px]">{copy.openFullScreen}</Text>
+              </Button>
+            </View>
+          </>
+        )}
+      </View>
+    </View>
+  );
+}
+
+// ─── Steps Inspector Pane ────────────────────────────────────────────────────
 
 function StepsInspectorPane({
   sessionId,
   state,
   resolved,
   copy,
-  onPrev,
-  onNext,
-  onJumpLive,
 }: {
   sessionId: string;
   state: ReturnType<typeof deriveComputerState>;
   resolved: ReturnType<typeof resolveComputerStepIndex>;
   copy: ComputerCopy;
-  onPrev: () => void;
-  onNext: () => void;
-  onJumpLive: () => void;
 }) {
   const scrollRef = useRef<any>(null);
   const pinnedRef = useRef(true);
   const openPreview = useToolPreviewStore((s) => s.openPreview);
   const openFilePreview = useToolFilePreviewStore((s) => s.openPreview);
+  const [showDetails, setShowDetails] = useState(false);
 
   const step = resolved.step;
 
-  // Auto-scroll live terminal/step output while pinned to end; pause when user scrolls up.
+  // Reset Details disclosure when switching steps so raw dumps stay collapsed by default.
   useEffect(() => {
-    if (resolved.isLive && pinnedRef.current && step?.output.text) {
+    setShowDetails(false);
+  }, [step?.id]);
+
+  // Auto-scroll live terminal output while pinned to end; pause when user scrolls up.
+  useEffect(() => {
+    if (resolved.isLive && pinnedRef.current && step?.surface === 'terminal' && step?.output.text) {
       scrollRef.current?.scrollToEnd?.({ animated: false });
     }
-  }, [resolved.isLive, step?.id, step?.output.text]);
+  }, [resolved.isLive, step?.id, step?.surface, step?.output.text]);
 
   const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
@@ -373,13 +765,15 @@ function StepsInspectorPane({
   }
 
   const SurfaceIcon = SURFACE_ICONS[step.surface];
-  const total = state.steps.length;
-  const progressPct = total <= 1 ? 100 : Math.round(((resolved.index + 1) / total) * 100);
+  const hasRealLocalPreview = step.surface === 'browser' && isLocalhostPreviewUrl(step.url);
+  const isBrowserOrTool = step.surface === 'browser' || step.surface === 'mcp';
+  const hasCollapsibleDetails =
+    isBrowserOrTool && Boolean(step.output.text || step.argsPreview || (step.surface === 'browser' && step.command));
 
   return (
-    <View style={{ flex: 1 }} className="px-4">
+    <View testID="computer-steps-pane" style={{ flex: 1 }} className="px-4">
       <View style={{ flex: 1 }} className="overflow-hidden rounded-3xl border border-border bg-card">
-        {/* Card header */}
+        {/* Step card header — never shows "bash" for browser steps */}
         <View
           className={
             copy.isRtl
@@ -399,20 +793,25 @@ function StepsInspectorPane({
             ) : (
               <Icon as={SurfaceIcon} size={15} className="text-muted-foreground" />
             )}
-            <Text className="shrink text-[13px] font-roobert-medium text-foreground" numberOfLines={1}>
+            <Text
+              testID="computer-step-header-title"
+              className="shrink text-[13px] font-roobert-medium text-foreground"
+              numberOfLines={1}
+            >
               {step.title}
             </Text>
             <Text variant="muted" className="flex-1 text-[12px]" numberOfLines={1}>
-              {step.subtitle}
+              {step.humanDetail}
             </Text>
           </View>
 
-          {step.surface === 'browser' && step.url ? (
+          {hasRealLocalPreview && step.url ? (
             <Button
+              testID="computer-open-preview-btn"
               variant="secondary"
               size="sm"
               className="rounded-full"
-              onPress={() => openPreview(step.url!, step.pageTitle || step.subtitle)}
+              onPress={() => openPreview(step.url!, step.pageTitle || step.humanDetail)}
             >
               <Icon as={ArrowSquareOutIcon} size={13} />
               <Text className="text-[12px]">{copy.openPreview}</Text>
@@ -426,7 +825,7 @@ function StepsInspectorPane({
                 {`-${step.diffStats.deletions}`}
               </Text>
             </View>
-          ) : typeof step.exitCode === 'number' ? (
+          ) : step.surface === 'terminal' && typeof step.exitCode === 'number' ? (
             <View className="rounded-full border border-border bg-muted/40 px-2 py-0.5">
               <Text className="text-[11px] tabular-nums text-muted-foreground">
                 {`exit ${step.exitCode}`}
@@ -446,26 +845,23 @@ function StepsInspectorPane({
             <View className="flex-row items-start gap-2 rounded-2xl border border-border bg-muted/50 px-3 py-2.5">
               <Icon as={WarningCircleIcon} size={15} color={THEME.accent.orange} />
               <View className="min-w-0 flex-1 gap-0.5">
-                <Text className="text-[12px] font-roobert-medium text-foreground">
-                  {copy.networkRestricted}
+                <Text className="text-[12.5px] font-roobert-medium text-foreground">
+                  {copy.networkRestrictedHost(step.restrictedHost)}
                 </Text>
                 <Text className="text-[12px] leading-4 text-muted-foreground">
-                  {copy.networkRestrictedHint}
+                  {copy.networkRestrictedHint(step.restrictedHost)}
                 </Text>
               </View>
             </View>
           ) : null}
 
-          {step.url ? (
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => openPreview(step.url!, step.pageTitle || step.subtitle)}
-              className="flex-row items-center gap-2 rounded-2xl border border-border bg-muted/40 px-3 py-2 active:opacity-75"
-            >
+          {/* Browser URL & recorded frame */}
+          {step.surface === 'browser' && step.url ? (
+            <View className="flex-row items-center gap-2 rounded-2xl border border-border bg-muted/40 px-3 py-2">
               <Icon as={GlobeIcon} size={14} className="text-muted-foreground" />
               <View className="min-w-0 flex-1">
                 {step.pageTitle ? (
-                  <Text className="text-[12px] font-roobert-medium text-foreground" numberOfLines={1}>
+                  <Text className="text-[12.5px] font-roobert-medium text-foreground" numberOfLines={1}>
                     {step.pageTitle}
                   </Text>
                 ) : null}
@@ -473,22 +869,22 @@ function StepsInspectorPane({
                   {step.url}
                 </Text>
               </View>
-              <Icon as={ArrowSquareOutIcon} size={13} className="text-muted-foreground" />
-            </Pressable>
+            </View>
           ) : null}
 
           {step.screenshotUrl ? (
             <View className="overflow-hidden rounded-2xl border border-border bg-background">
               <Image
                 source={{ uri: step.screenshotUrl }}
-                style={{ width: '100%', height: 196 }}
+                style={{ width: '100%', height: 220 }}
                 resizeMode="cover"
-                accessibilityLabel={step.pageTitle || step.subtitle}
+                accessibilityLabel={step.pageTitle || step.humanDetail}
               />
             </View>
           ) : null}
 
-          {step.command ? (
+          {/* Terminal view: command + monospace output */}
+          {step.surface === 'terminal' && step.command ? (
             <View className="rounded-2xl border border-border bg-muted/40 px-3 py-2">
               <Text style={{ fontFamily: monoFont, fontSize: 12, lineHeight: 18 }} className="text-foreground">
                 {`$ ${step.command}`}
@@ -496,6 +892,7 @@ function StepsInspectorPane({
             </View>
           ) : null}
 
+          {/* Files view: path + diff lines */}
           {step.filePath ? (
             <Pressable
               accessibilityRole="button"
@@ -535,19 +932,6 @@ function StepsInspectorPane({
             </View>
           ) : null}
 
-          {step.argsPreview ? (
-            <View className="gap-1">
-              <Text className="text-[11px] font-roobert-medium uppercase tracking-wide text-muted-foreground">
-                {copy.argumentsLabel}
-              </Text>
-              <View className="rounded-2xl border border-border bg-muted/30 p-3">
-                <Text style={{ fontFamily: monoFont, fontSize: 11.5, lineHeight: 17 }} className="text-muted-foreground">
-                  {step.argsPreview}
-                </Text>
-              </View>
-            </View>
-          ) : null}
-
           {step.errorText ? (
             <View className="rounded-2xl border border-destructive/30 bg-destructive/10 p-3">
               <Text style={{ fontFamily: monoFont, fontSize: 12, lineHeight: 18 }} className="text-destructive">
@@ -556,27 +940,72 @@ function StepsInspectorPane({
             </View>
           ) : null}
 
-          {step.output.text && !(step.diffLines && step.diffLines.length > 0) ? (
-            <View className="gap-1">
-              {step.surface === 'mcp' ? (
-                <Text className="text-[11px] font-roobert-medium uppercase tracking-wide text-muted-foreground">
-                  {copy.resultLabel}
-                </Text>
-              ) : null}
-              <Text
-                selectable
-                style={{ fontFamily: monoFont, fontSize: 12, lineHeight: 18.5 }}
-                className="text-foreground"
-              >
-                {step.output.text}
-              </Text>
-            </View>
-          ) : step.status === 'running' ? (
+          {/* Terminal & File output rendered directly */}
+          {!isBrowserOrTool && step.output.text && !(step.diffLines && step.diffLines.length > 0) ? (
+            <Text
+              selectable
+              style={{ fontFamily: monoFont, fontSize: 12, lineHeight: 18.5 }}
+              className="text-foreground"
+            >
+              {step.output.text}
+            </Text>
+          ) : step.status === 'running' && !step.screenshotUrl ? (
             <View className="flex-row items-center gap-2 py-2">
               <SessionDotMatrix sessionId={sessionId} size={13} />
               <Text variant="muted" className="text-[13px]">
                 {copy.working}
               </Text>
+            </View>
+          ) : null}
+
+          {/* Raw browser / tool output (accessibility trees, logs, JSON args) lives inside collapsed Details */}
+          {hasCollapsibleDetails ? (
+            <View className="gap-2">
+              <Pressable
+                testID="computer-details-toggle"
+                accessibilityRole="button"
+                accessibilityState={{ expanded: showDetails }}
+                onPress={() => {
+                  haptics.tap();
+                  setShowDetails((v) => !v);
+                }}
+                className="flex-row items-center justify-between rounded-2xl border border-border bg-background px-3 py-2 active:opacity-75"
+              >
+                <Text className="text-[12px] font-roobert-medium text-muted-foreground">
+                  {showDetails ? copy.detailsHide : copy.detailsShow}
+                </Text>
+                <Icon
+                  as={showDetails ? CaretUpIcon : CaretDownIcon}
+                  size={13}
+                  className="text-muted-foreground"
+                />
+              </Pressable>
+
+              {showDetails ? (
+                <View
+                  testID="computer-details-body"
+                  className="gap-2 rounded-2xl border border-border bg-background p-3"
+                >
+                  {step.argsPreview ? (
+                    <Text
+                      selectable
+                      style={{ fontFamily: monoFont, fontSize: 11, lineHeight: 16.5 }}
+                      className="text-muted-foreground"
+                    >
+                      {step.argsPreview}
+                    </Text>
+                  ) : null}
+                  {step.output.text ? (
+                    <Text
+                      selectable
+                      style={{ fontFamily: monoFont, fontSize: 11.5, lineHeight: 17 }}
+                      className="text-foreground"
+                    >
+                      {step.output.text}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
             </View>
           ) : null}
 
@@ -588,65 +1017,6 @@ function StepsInspectorPane({
             </View>
           ) : null}
         </SheetScrollView>
-      </View>
-
-      {/* Timeline Scrubber Bar */}
-      <View className="gap-2.5 pt-3">
-        <View className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-          <View
-            style={{ width: `${progressPct}%` }}
-            className="h-full rounded-full bg-foreground"
-          />
-        </View>
-
-        <View
-          className={
-            copy.isRtl
-              ? 'flex-row-reverse items-center justify-between'
-              : 'flex-row items-center justify-between'
-          }
-        >
-          <Button
-            variant="ghost"
-            size="icon"
-            className="rounded-full"
-            disabled={resolved.index <= 0}
-            accessibilityLabel="Previous step"
-            onPress={onPrev}
-          >
-            <Icon as={copy.isRtl ? CaretRightIcon : CaretLeftIcon} size={18} />
-          </Button>
-
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={resolved.isLive ? copy.live : copy.stepOf(resolved.index + 1, total)}
-            onPress={resolved.isLive ? undefined : onJumpLive}
-            className="flex-row items-center gap-2 rounded-full border border-border bg-card px-3.5 py-1.5 active:opacity-75"
-          >
-            <View
-              style={{
-                width: 7,
-                height: 7,
-                borderRadius: 3.5,
-                backgroundColor: resolved.isLive ? THEME.accent.green : THEME.light.mutedForeground,
-              }}
-            />
-            <Text className="text-[12px] font-roobert-medium tabular-nums text-foreground">
-              {resolved.isLive ? copy.live : copy.stepOf(resolved.index + 1, total)}
-            </Text>
-          </Pressable>
-
-          <Button
-            variant="ghost"
-            size="icon"
-            className="rounded-full"
-            disabled={resolved.isLive || resolved.index >= total - 1}
-            accessibilityLabel="Next step"
-            onPress={onNext}
-          >
-            <Icon as={copy.isRtl ? CaretLeftIcon : CaretRightIcon} size={18} />
-          </Button>
-        </View>
       </View>
     </View>
   );

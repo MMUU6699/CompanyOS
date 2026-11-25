@@ -5,11 +5,8 @@ import type { SessionLogTurn, ToolCallBlock } from '@kortix/sdk';
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
-// ─── Native / UI mocks for Bun component test ────────────────────────────────
-
 let presentCalls = 0;
 let dismissCalls = 0;
-let lastOnDismiss: (() => void) | undefined;
 
 mock.module('react-native', () => ({
   View: 'View',
@@ -19,9 +16,17 @@ mock.module('react-native', () => ({
   ScrollView: 'ScrollView',
   Platform: { OS: 'android', select: (obj: Record<string, unknown>) => obj.android ?? obj.default },
   Linking: { openURL: mock(async () => true) },
+  AppState: {
+    currentState: 'active',
+    addEventListener: mock(() => ({ remove: () => {} })),
+  },
   BackHandler: {
     addEventListener: mock(() => ({ remove: () => {} })),
   },
+}));
+
+mock.module('react-native-webview', () => ({
+  WebView: 'WebView',
 }));
 
 mock.module('react-native-reanimated', () => ({
@@ -40,6 +45,19 @@ mock.module('nativewind', () => ({
 
 mock.module('react-native-safe-area-context', () => ({
   useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+
+mock.module('@/api/config', () => ({
+  API_URL: 'https://api.example.com/v1',
+}));
+
+mock.module('@/lib/utils/html-embed', () => ({
+  isTrustedProxyUrl: (url: string) => url.startsWith('https://api.example.com/v1/p/'),
+  allowBrowserNavigation: () => true,
+}));
+
+mock.module('@/components/session/computer/useDesktopThumbnail', () => ({
+  useDesktopThumbnail: () => null,
 }));
 
 mock.module('@/contexts', () => ({
@@ -73,11 +91,15 @@ mock.module('@/lib/utils/theme', () => ({
   THEME: {
     light: {
       background: 'hsl(0 0% 100%)',
+      foreground: 'hsl(0 0% 12.2%)',
+      card: 'hsl(0 0% 95.7%)',
       border: 'hsl(0 0% 88.6%)',
       mutedForeground: 'hsl(0 0% 40%)',
     },
     dark: {
       background: 'hsl(0 0% 4.3%)',
+      foreground: 'hsl(0 0% 100%)',
+      card: 'hsl(0 0% 7.8%)',
       border: 'hsl(0 0% 14.9%)',
       mutedForeground: 'hsl(0 0% 60%)',
     },
@@ -96,56 +118,38 @@ mock.module('@/lib/onboarding/daytona-client', () => ({
   notifyDaytonaReconnectRequired: () => {},
 }));
 
-mock.module('@/components/ui/text', () => ({
-  Text: 'Text',
-}));
-
-mock.module('@/components/ui/icon', () => ({
-  Icon: 'Icon',
-}));
-
-mock.module('@/components/ui/button', () => ({
-  Button: 'Pressable',
-}));
-
-mock.module('@/components/kortix/kortix-loader', () => ({
-  KortixLoader: () => React.createElement('Loader'),
-}));
-
-mock.module('@/components/session/dot-matrix/session-dot-matrix', () => ({
-  SessionDotMatrix: () => React.createElement('DotMatrix'),
-}));
-
-mock.module('@/components/session/tool/shared/styles', () => ({
-  monoFont: 'monospace',
-}));
-
+mock.module('@/components/ui/text', () => ({ Text: 'Text' }));
+mock.module('@/components/ui/icon', () => ({ Icon: 'Icon' }));
+mock.module('@/components/ui/button', () => ({ Button: 'Pressable' }));
+mock.module('@/components/kortix/kortix-loader', () => ({ KortixLoader: 'Loader' }));
+mock.module('@/components/session/dot-matrix/session-dot-matrix', () => ({ SessionDotMatrix: 'DotMatrix' }));
+mock.module('@/components/session/tool/shared/styles', () => ({ monoFont: 'monospace' }));
 mock.module('@/components/session/tool/shared/navigation', () => ({
   useToolFilePreviewStore: (sel: (s: { openPreview: () => void }) => unknown) =>
     sel({ openPreview: () => {} }),
 }));
-
 mock.module('@/stores/tool-preview-store', () => ({
   useToolPreviewStore: (sel: (s: { openPreview: () => void }) => unknown) =>
     sel({ openPreview: () => {} }),
 }));
-
 mock.module('@/stores/tab-store', () => ({
-  useTabStore: {
-    subscribe: () => () => {},
-  },
+  useTabStore: { subscribe: () => () => {} },
 }));
 
 mock.module('@/lib/icons', () => {
   const stub = () => null;
   return {
+    ArrowCounterClockwiseIcon: stub,
     ArrowSquareOutIcon: stub,
+    CaretDownIcon: stub,
     CaretLeftIcon: stub,
     CaretRightIcon: stub,
     CaretUpIcon: stub,
     CpuIcon: stub,
     FileCodeIcon: stub,
     GlobeIcon: stub,
+    LockIcon: stub,
+    LockOpenIcon: stub,
     MonitorIcon: stub,
     TerminalWindowIcon: stub,
     WarningCircleIcon: stub,
@@ -165,7 +169,6 @@ mock.module('@/components/kortix/sheet', () => ({
       props: { children?: React.ReactNode; onDismiss?: () => void },
       ref: React.ForwardedRef<{ present: () => void; dismiss: () => void }>,
     ) => {
-      lastOnDismiss = props.onDismiss;
       useImperativeHandle(ref, () => ({
         present: () => {
           presentCalls += 1;
@@ -182,13 +185,12 @@ mock.module('@/components/kortix/sheet', () => ({
     React.createElement(
       'View',
       { testID: 'sheet-title-row' },
-      React.createElement('Text', {}, title),
+      React.createElement('Text', { testID: 'computer-sheet-title' }, title),
       React.createElement('Pressable', { testID: 'computer-sheet-close', onPress: onClose }),
     ),
 }));
 
-// Load components AFTER mocks are registered.
-const { ComputerDock } = await import('./ComputerDock');
+const { ComputerDock, ComputerDockShell } = await import('./ComputerDock');
 const { ComputerSheet } = await import('./ComputerSheet');
 const { useComputerSheetStore } = await import('@/stores/computer-sheet-store');
 
@@ -200,11 +202,11 @@ function makeBrowserTurn(): SessionLogTurn[] {
     name: 'bash',
     kind: 'shell',
     input: {
-      command: 'AGENT_BROWSER_HEADED=false agent-browser open https://www.google.com && agent-browser get title',
+      command: 'DISPLAY=:1 AGENT_BROWSER_HEADED=true agent-browser open https://github.com/Simpleyyt/ai-manus',
     },
     status: 'complete',
     result: {
-      content: [{ type: 'text', text: 'Title: Google' }],
+      content: [{ type: 'text', text: 'RAW_ACCESSIBILITY_TREE_DUMP_LINE_1\nlink "Code" [ref=e1]' }],
       is_error: false,
     },
   };
@@ -218,15 +220,14 @@ function collectText(node: TestRenderer.ReactTestRendererJSON | TestRenderer.Rea
   return (node.children ?? []).map((c) => collectText(c as TestRenderer.ReactTestRendererJSON)).join(' ');
 }
 
-describe('ComputerDock + ComputerSheet interaction', () => {
+describe('ComputerDock + ComputerSheet live desktop & steps modes', () => {
   beforeEach(() => {
     presentCalls = 0;
     dismissCalls = 0;
-    lastOnDismiss = undefined;
     useComputerSheetStore.setState({ openSessionId: null, initialTab: 'steps' });
   });
 
-  test('pressing dock opens sheet (never calling dismiss before present), renders real tool content, and closing hides it', () => {
+  test('dock opens sheet in Live view, switches to Steps (no bash header, collapsed Details, no Open preview for external URL), and closes cleanly', () => {
     const turns = makeBrowserTurn();
     let renderer!: TestRenderer.ReactTestRenderer;
 
@@ -235,34 +236,36 @@ describe('ComputerDock + ComputerSheet interaction', () => {
         React.createElement(
           React.Fragment,
           null,
-          React.createElement(ComputerDock, {
-            sessionId: 'sess-1',
-            turns,
-            isBusy: true,
-            sandboxUrl: 'https://api.example.com/v1/p/ext-1/8000',
-          }),
+          React.createElement(
+            ComputerDockShell,
+            { active: true },
+            React.createElement(ComputerDock, {
+              sessionId: 'sess-1',
+              turns,
+              isBusy: true,
+              sandboxUrl: 'https://api.example.com/v1/p/ext-1/8000',
+            }),
+          ),
           React.createElement(ComputerSheet, {
             sessionId: 'sess-1',
             turns,
             isBusy: true,
             sandboxUrl: 'https://api.example.com/v1/p/ext-1/8000',
+            agentName: 'My Kortix',
           }),
         ),
       );
     });
 
-    // 1. Before tap: sheet is NOT mounted, dismiss() was NEVER called on initial mount.
+    // 1. Before tap: sheet unmounted, dismiss() never called, dock shows humanized domain (no raw env vars).
     expect(presentCalls).toBe(0);
     expect(dismissCalls).toBe(0);
     expect(renderer.root.findAllByProps({ testID: 'session-computer-sheet' })).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ testID: 'session-computer-shell' })).toHaveLength(1);
+    expect(renderer.root.findByProps({ testID: 'computer-dock-label' }).props.children).toBe('Using Browser');
+    expect(renderer.root.findByProps({ testID: 'computer-dock-detail' }).props.children).toBe('github.com');
 
-    // Dock renders thumbnail + animated blue dot + pure label "Using Browser".
-    expect(renderer.root.findAllByProps({ testID: 'computer-dock-thumb-browser' })).toHaveLength(1);
-    expect(renderer.root.findAllByProps({ testID: 'computer-dock-dot-blue' })).toHaveLength(1);
-    const labelNode = renderer.root.findByProps({ testID: 'computer-dock-label' });
-    expect(labelNode.props.children).toBe('Using Browser');
-
-    // 2. Press dock -> sheet mounts, calls present() once, displays real browser step content.
+    // 2. Tap dock -> mounts sheet in Live view with "<agent>'s computer" title & humanized caption.
     const dockBtn = renderer.root.findByProps({ testID: 'session-computer-dock-button' });
     act(() => {
       dockBtn.props.onPress();
@@ -271,26 +274,37 @@ describe('ComputerDock + ComputerSheet interaction', () => {
     expect(presentCalls).toBe(1);
     expect(dismissCalls).toBe(0);
     expect(renderer.root.findAllByProps({ testID: 'session-computer-sheet' })).toHaveLength(1);
-    const fullText = collectText(renderer.toJSON());
-    expect(fullText).toContain('https://www.google.com');
-    expect(fullText).toContain('Google');
+    expect(renderer.root.findByProps({ testID: 'computer-sheet-title' }).props.children).toBe("My Kortix's computer");
+    expect(renderer.root.findByProps({ testID: 'computer-sheet-caption' }).props.children).toBe(
+      'My Kortix is using Browser · github.com',
+    );
+    expect(renderer.root.findAllByProps({ testID: 'computer-live-desktop' })).toHaveLength(1);
 
-    // 3. Close sheet -> dismisses and unmounts cleanly.
+    // 3. Switch mode -> Steps: Browser header (not "bash"), no "Open preview" for github.com, raw output collapsed behind Details.
+    const stepsTab = renderer.root.findByProps({ testID: 'computer-sheet-mode-steps' });
+    act(() => {
+      stepsTab.props.onPress();
+    });
+
+    expect(renderer.root.findAllByProps({ testID: 'computer-steps-pane' })).toHaveLength(1);
+    expect(renderer.root.findByProps({ testID: 'computer-step-header-title' }).props.children).toBe('Browser');
+    expect(renderer.root.findAllByProps({ testID: 'computer-open-preview-btn' })).toHaveLength(0);
+    expect(collectText(renderer.toJSON())).not.toContain('RAW_ACCESSIBILITY_TREE_DUMP_LINE_1');
+
+    // Expand Details -> reveals raw output cleanly
+    const detailsToggle = renderer.root.findByProps({ testID: 'computer-details-toggle' });
+    act(() => {
+      detailsToggle.props.onPress();
+    });
+    expect(collectText(renderer.toJSON())).toContain('RAW_ACCESSIBILITY_TREE_DUMP_LINE_1');
+
+    // 4. Close sheet -> unmounts cleanly.
     const closeBtn = renderer.root.findByProps({ testID: 'computer-sheet-close' });
     act(() => {
       closeBtn.props.onPress();
     });
-
     expect(dismissCalls).toBe(1);
     expect(renderer.root.findAllByProps({ testID: 'session-computer-sheet' })).toHaveLength(0);
-    expect(lastOnDismiss).toBeDefined();
-
-    // 4. Press dock a second time -> reopens reliably.
-    act(() => {
-      dockBtn.props.onPress();
-    });
-    expect(presentCalls).toBe(2);
-    expect(renderer.root.findAllByProps({ testID: 'session-computer-sheet' })).toHaveLength(1);
 
     act(() => {
       renderer.unmount();

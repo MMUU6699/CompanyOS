@@ -213,7 +213,7 @@ import { PermissionPromptCard } from './PermissionPromptCard';
 import { MarkdownActionsProvider } from '@/components/markdown/inline-code';
 import { ToolFilePreviewHost, useToolFilePreviewStore } from '@/components/session/tool/shared/navigation';
 import { SandboxPreviewSheet } from '@/components/session/SandboxPreviewSheet';
-import { ComputerDock } from '@/components/session/computer/ComputerDock';
+import { ComputerDock, ComputerDockShell } from '@/components/session/computer/ComputerDock';
 import { ComputerSheet } from '@/components/session/computer/ComputerSheet';
 import { ActivitySheetHost } from '@/components/session/turn/activity-sheet';
 import type { PermissionReply } from '@/components/session/tool/tool-part-renderer';
@@ -2449,6 +2449,7 @@ function SessionPageImpl({ sessionId, projectId, projectSessionId, onBack, onOpe
           }
         />
       )}
+      <ComputerDockShell active={!hasQuestion && Boolean(sandboxUrl || turns.length > 0)}>
       {!hasQuestion && (
         <ComputerDock
           sessionId={sessionId}
@@ -2509,6 +2510,7 @@ function SessionPageImpl({ sessionId, projectId, projectSessionId, onBack, onOpe
           />
         )}
         </View>
+      </ComputerDockShell>
       </View>
       </Reanimated.View>
         </View>
@@ -2533,6 +2535,7 @@ function SessionPageImpl({ sessionId, projectId, projectSessionId, onBack, onOpe
         turns={turns}
         isBusy={isBusy}
         sandboxUrl={sandboxUrl}
+        agentName={resolved.agent?.name}
       />
 
       {/* The activity summary rows' sheet (ActivityBurst) */}
