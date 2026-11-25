@@ -1399,5 +1399,21 @@
     "openError": "Unable to open this artifact",
     "more": "Artifact actions",
     "unavailable": "Artifacts are not available in this workspace"
+  },
+  "computer": {
+    "title": "Session computer",
+    "usingTerminal": "Using Terminal",
+    "usingBrowser": "Using Browser",
+    "usingComputer": "Using Computer",
+    "editingFiles": "Editing files",
+    "searchingWeb": "Searching the web",
+    "usingConnector": "Using {{name}}",
+    "working": "Working",
+    "idle": "Idle",
+    "inactive": "Inactive",
+    "waking": "Waking computer",
+    "offline": "Offline",
+    "networkRestricted": "Network restricted",
+    "error": "Error"
   }
 }
