@@ -6,6 +6,8 @@ description: How to reach a user's CONNECTED COMPUTER (their laptop, desktop, or
 <skill name="kortix-computer">
 
 <which-desktop>
+IMPORTANT: This skill is ONLY for the user's own external physical Mac/PC/server. If the user asks you to use YOUR browser, open a website/Chrome, or run commands on YOUR session computer, do NOT use `kortix-computer` — run `agent-browser` / `bash` directly in this session.
+
 "My desktop" can mean three places:
 
 - **Their Drive folder,** `~/Desktop` (= `/drives/me`). Kortix mounts it as

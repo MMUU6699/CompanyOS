@@ -41,7 +41,7 @@ A project agent's computer (the default image and custom templates) also has:
 - ffmpeg, LibreOffice, Pandoc, LaTeX, Poppler, qpdf, and Tesseract. Never use `docx2pdf` (requires MS Word; fails on Linux) — convert Office documents with `soffice --headless --convert-to pdf`.
 - The desktop below, on an Ubuntu 24.04 base.
 
-My Kortix's computer has only the first list: it hands project work to a project agent's session.
+My Kortix runs on this same image and has `agent-browser`, Chromium, and `kortix-desktop` available directly in its session computer; it only hands off to a project agent when shared workspace repository changes or parallel colleagues are needed.
 
 ## Desktop
 
